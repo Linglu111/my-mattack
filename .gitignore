@@ -44,4 +44,7 @@ openaigpt/api_keys.json
 
 LAT/
 
+# 忽略resources目录下的所有文件
+resources/**/*
+
 visulize.ipynb

@@ -30,7 +30,12 @@ from surrogates import (
 
 from utils import hash_training_config, setup_wandb, ensure_dir
 
-# Mapping from backbone names to model classes
+# 模型名称 → 特征提取器类的映射表
+# 用于根据配置文件中的字符串名称动态实例化对应的CLIP模型
+# - L336: CLIP ViT-L/14@336px (大模型，高分辨率)
+# - B16:  CLIP ViT-B/16 (小模型，速度快)
+# - B32:  CLIP ViT-B/32 (小模型，更粗粒度)
+# - Laion: CLIP在LAION数据集上微调的版本
 BACKBONE_MAP: Dict[str, type] = {
     "L336": ClipL336FeatureExtractor,
     "B16": ClipB16FeatureExtractor,
@@ -40,16 +45,25 @@ BACKBONE_MAP: Dict[str, type] = {
 
 
 def get_models(cfg: MainConfig):
-    """Get models based on configuration.
+    """根据配置初始化并加载代理模型（CLIP特征提取器）
 
     Args:
-        cfg: Configuration object containing model settings
+        cfg: 配置对象，包含 model.backbone（模型名称列表）、
+             model.ensemble（是否使用集成）、model.device（设备）等
 
     Returns:
-        Tuple of (feature_extractor, list of models)
+        tuple: (ensemble_extractor, models)
+            - ensemble_extractor: 集成特征提取器（EnsembleFeatureExtractor）或单个模型
+            - models: 所有模型实例的列表，用于后续创建集成损失函数
 
     Raises:
-        ValueError: If ensemble=False but multiple backbones specified
+        ValueError: 当 ensemble=False 但指定了多个backbone时抛出异常
+
+    逻辑说明：
+        1. 校验配置一致性：非集成模式只能指定一个模型
+        2. 遍历backbone列表，通过BACKBONE_MAP找到对应类并实例化
+        3. 每个模型设为eval模式、移至指定设备、冻结参数（requires_grad=False）
+        4. 根据ensemble标志决定返回集成包装器还是单个模型
     """
     if not cfg.model.ensemble and len(cfg.model.backbone) > 1:
         raise ValueError("When ensemble=False, only one backbone can be specified")
@@ -61,23 +75,41 @@ def get_models(cfg: MainConfig):
                 f"Unknown backbone: {backbone_name}. Valid options are: {list(BACKBONE_MAP.keys())}"
             )
         model_class = BACKBONE_MAP[backbone_name]
+        # 实例化模型 → eval模式(关闭Dropout等) → 移至GPU/CPU → 冻结参数
         model = model_class().eval().to(cfg.model.device).requires_grad_(False)
         models.append(model)
 
     if cfg.model.ensemble:
+        # 集成模式：用EnsembleFeatureExtractor包装所有模型
+        # 前向传播时会依次调用每个模型，返回字典形式的特征
         ensemble_extractor = EnsembleFeatureExtractor(models)
     else:
-        ensemble_extractor = models[0]  # Use single model directly
+        # 单模型模式：直接使用第一个模型
+        ensemble_extractor = models[0]
 
     return ensemble_extractor, models
 
 
 def get_ensemble_loss(cfg: MainConfig, models: List[nn.Module]):
+    # 将多个模型传入EnsembleFeatureLoss，用于计算对抗图像特征与目标特征的余弦相似度损失
     ensemble_loss = EnsembleFeatureLoss(models)
     return ensemble_loss
 
 
 def set_environment(seed=2023):
+    """设置全局随机种子，确保实验可复现
+
+    Args:
+        seed (int): 随机种子值，默认2023
+
+    固定以下随机数生成器：
+        - Python内置random模块
+        - PYTHONHASHSEED环境变量（影响字符串hash随机化）
+        - NumPy随机数生成器
+        - PyTorch CPU随机数生成器
+        - PyTorch CUDA随机数生成器
+        - cuDNN设为确定性模式（可能降低性能但保证复现）
+    """
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -87,8 +119,19 @@ def set_environment(seed=2023):
     torch.backends.cudnn.benchmark = False
 
 
-# Transform PIL.Image to PyTorch Tensor
 def to_tensor(pic):
+    """将PIL.Image对象转换为PyTorch张量
+
+    Args:
+        pic (PIL.Image): PIL图像对象，支持多种模式(RGB, L, I, I;16, F等)
+
+    Returns:
+        torch.Tensor: 形状为 [C, H, W] 的张量，dtype与默认dtype一致
+
+    注意：
+        这是手动实现的转换，不使用transforms.ToTensor()。
+        原因：需要支持更多PIL图像模式，且保持原始数值范围（不归一化到[0,1]）
+    """
     mode_to_nptype = {"I": np.int32, "I;16": np.int16, "F": np.float32}
     img = torch.from_numpy(
         np.array(pic, mode_to_nptype.get(pic.mode, np.uint8), copy=True)
@@ -98,8 +141,13 @@ def to_tensor(pic):
     return img.to(dtype=torch.get_default_dtype())
 
 
-# Dataset with image paths
 class ImageFolderWithPaths(torchvision.datasets.ImageFolder):
+    """自定义数据集类，继承自ImageFolder
+
+    与父类的区别：__getitem__额外返回图像的文件路径（第3个元素）
+    这样在保存对抗样本时可以知道原始文件名和目录结构
+    """
+
     def __getitem__(self, index):
         original_tuple = super().__getitem__(index)
         path, _ = self.samples[index]
@@ -116,9 +164,11 @@ def main(cfg: MainConfig):
     wandb.define_metric("epoch")
     wandb.define_metric("*", step_metric="epoch")
 
+    # ---- 步骤1: 初始化代理模型 ----
     ensemble_extractor, models = get_models(cfg)
     ensemble_loss = get_ensemble_loss(cfg, models)
 
+    # ---- 步骤2: 图像预处理 ----
     transform_fn = transforms.Compose(
         [
             transforms.Resize(
@@ -131,6 +181,7 @@ def main(cfg: MainConfig):
         ]
     )
 
+    # ---- 步骤3: 加载数据集 ----
     clean_data = ImageFolderWithPaths(cfg.data.cle_data_path, transform=transform_fn)
     target_data = ImageFolderWithPaths(cfg.data.tgt_data_path, transform=transform_fn)
 
@@ -144,6 +195,9 @@ def main(cfg: MainConfig):
     print("Using source crop:", cfg.model.use_source_crop)
     print("Using target crop:", cfg.model.use_target_crop)
 
+    # ---- 步骤4: 配置Local Matching裁剪策略 ----
+    # source_crop: 对对抗图像进行随机裁剪
+    # target_crop: 对目标图像进行随机裁剪
     source_crop = (
         transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
         if cfg.model.use_source_crop
@@ -155,6 +209,7 @@ def main(cfg: MainConfig):
         else torch.nn.Identity()
     )
 
+    # ---- 步骤5: 主循环 — 逐对处理图像 ----
     for i, ((image_org, _, path_org), (image_tgt, _, path_tgt)) in enumerate(
         zip(data_loader_imagenet, data_loader_target)
     ):
@@ -214,10 +269,14 @@ def attack_imgpair(
 
     # Save images
     for path_idx in range(len(path_org)):
-        folder, name = (
-            path_org[path_idx].split("/")[-2],
-            path_org[path_idx].split("/")[-1],
-        )
+        # folder, name = (
+        #     path_org[path_idx].split("/")[-2],
+        #     path_org[path_idx].split("/")[-1],
+        # )
+        # 使用os.path模块来正确处理路径，而不是简单的字符串分割
+        folder = os.path.basename(os.path.dirname(path_org[path_idx]))
+        name = os.path.basename(path_org[path_idx])
+        
         # Use config hash in output path
         folder_to_save = os.path.join(cfg.data.output, "img", config_hash, folder)
         ensure_dir(folder_to_save)
@@ -283,7 +342,8 @@ def fgsm_attack(
     Returns:
         torch.Tensor: Generated adversarial image
     """
-    # Initialize perturbation
+    # 初始化扰动
+    # 创建一个与image_org形状完全相同的全零张量，即需要优化的扰动
     delta = torch.zeros_like(image_org, requires_grad=True)
 
     # Progress bar for optimization
@@ -293,11 +353,13 @@ def fgsm_attack(
     for epoch in pbar:
 
         with torch.no_grad():
+            # target_crop(image_tgt)对目标图像进行随即裁剪
+            # set_ground_truth提取目标图像的特征并保存，由于后续计算余弦相似度
             ensemble_loss.set_ground_truth(target_crop(image_tgt))
 
         # Forward pass
-        adv_image = image_org + delta
-        adv_features = ensemble_extractor(adv_image)
+        adv_image = image_org + delta   # 构建当前轮次扰动
+        adv_features = ensemble_extractor(adv_image)    # 提取对抗图像的特征
 
         # Calculate metrics
         metrics = {
@@ -306,14 +368,14 @@ def fgsm_attack(
         }
 
         # Calculate loss based on configuration
-        global_sim = ensemble_loss(adv_features)
+        global_sim = ensemble_loss(adv_features)    # 计算对抗图像特征与目标图像特征的余弦相似度
         metrics["global_similarity"] = global_sim.item()
 
         if cfg.model.use_source_crop:
             # If using source crop, calculate additional local similarity
-            local_cropped = source_crop(adv_image)
-            local_features = ensemble_extractor(local_cropped)
-            local_sim = ensemble_loss(local_features)
+            local_cropped = source_crop(adv_image)  #对对抗图像进行随即裁剪
+            local_features = ensemble_extractor(local_cropped)  # 提取局部特征
+            local_sim = ensemble_loss(local_features)   # 计算局部相似度
             loss = local_sim
             metrics["local_similarity"] = local_sim.item()
         else:
@@ -323,9 +385,10 @@ def fgsm_attack(
         # Log current metrics
         log_metrics(pbar, metrics, img_index, epoch)
 
-        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
+        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]  #计算梯度
 
         # Update delta using FGSM
+        # clamp(delta, [-ε, ε]) 投影到约束空间
         delta.data = torch.clamp(
             delta + cfg.optim.alpha * torch.sign(grad),
             min=-cfg.optim.epsilon,
@@ -333,8 +396,8 @@ def fgsm_attack(
         )
 
     # Create final adversarial image
-    adv_image = image_org + delta
-    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
+    adv_image = image_org + delta   
+    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)    #归一化
 
     # Log final perturbation metrics
     final_metrics = {
@@ -372,9 +435,10 @@ def mifgsm_attack(
     Returns:
         torch.Tensor: Generated adversarial image
     """
-    # Initialize perturbation and momentum
-    delta = torch.zeros_like(image_org, requires_grad=True)
-    momentum = torch.zeros_like(image_org, requires_grad=False)
+    # # 初始化扰动
+    # 创建一个与image_org形状完全相同的全零张量，即需要优化的扰动
+    delta = torch.zeros_like(image_org, requires_grad=True) 
+    momentum = torch.zeros_like(image_org, requires_grad=False) #动量张量
 
     # Progress bar for optimization
     pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
@@ -396,14 +460,14 @@ def mifgsm_attack(
         }
 
         # Calculate loss based on configuration
-        global_sim = ensemble_loss(adv_features)
+        global_sim = ensemble_loss(adv_features)    #计算对抗图像与目标图像的全局余弦相似度
         metrics["global_similarity"] = global_sim.item()
 
         if cfg.model.use_source_crop:
             # If using source crop, calculate additional local similarity
-            local_cropped = source_crop(adv_image)
-            local_features = ensemble_extractor(local_cropped)
-            local_sim = ensemble_loss(local_features)
+            local_cropped = source_crop(adv_image)  #局部随即裁剪
+            local_features = ensemble_extractor(local_cropped)  #提取局部特征
+            local_sim = ensemble_loss(local_features)   #计算局部余弦相似度
             loss = local_sim
             metrics["local_similarity"] = local_sim.item()
         else:
@@ -412,10 +476,10 @@ def mifgsm_attack(
 
         log_metrics(pbar, metrics, img_index, epoch)
 
-        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
+        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]  #计算梯度
 
         # MI-FGSM update
-        momentum = momentum * 0.9 + grad
+        momentum = momentum * 0.9 + grad    #使用动量更新
         delta.data = torch.clamp(
             delta + cfg.optim.alpha * torch.sign(momentum),
             min=-cfg.optim.epsilon,
@@ -424,7 +488,7 @@ def mifgsm_attack(
 
     # Create final adversarial image
     adv_image = image_org + delta
-    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
+    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)    #归一化
 
     # Log final perturbation metrics
     final_metrics = {
@@ -464,7 +528,7 @@ def pgd_attack(
     """
     # Initialize perturbation and momentum
     delta = torch.zeros_like(image_org, requires_grad=True)
-    optimizer = torch.optim.Adam([delta], lr=cfg.optim.alpha)
+    optimizer = torch.optim.Adam([delta], lr=cfg.optim.alpha)   #Adam优化器
 
     # Progress bar for optimization
     pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
@@ -494,7 +558,7 @@ def pgd_attack(
             local_cropped = source_crop(adv_image)
             local_features = ensemble_extractor(local_cropped)
             local_sim = ensemble_loss(local_features)
-            loss = -local_sim # since we want to maximize the loss
+            loss = -local_sim # since we want to maximize the loss 最小化负相似度
             metrics["local_similarity"] = local_sim.item()
         else:
             # Otherwise use global similarity as loss
