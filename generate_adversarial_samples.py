@@ -281,11 +281,21 @@ def attack_imgpair(
         folder_to_save = os.path.join(cfg.data.output, "img", config_hash, folder)
         ensure_dir(folder_to_save)
 
-        if "JPEG" in name:
+        # Get file extension and make it lowercase for case-insensitive check
+        ext = os.path.splitext(name)[1].lower()
+        
+        if ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
+            # For JPEG files, convert to PNG
+            if ext in [".jpg", ".jpeg"]:
+                save_name = os.path.splitext(name)[0] + ".png"
+            else:
+                save_name = name
+            
             torchvision.utils.save_image(
-                adv_image[path_idx], os.path.join(folder_to_save, name[:-4]) + "png"
+                adv_image[path_idx], os.path.join(folder_to_save, save_name)
             )
-        elif "png" in name:
+        else:
+            # Save with original extension if not recognized
             torchvision.utils.save_image(
                 adv_image[path_idx], os.path.join(folder_to_save, name)
             )

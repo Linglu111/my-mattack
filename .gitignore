@@ -44,9 +44,7 @@ openaigpt/api_keys.json
 
 LAT/
 
-# 忽略resources/images/bigscale/im2gps3k目录下的所有文件
-resources/images/bigscale/im2gps3k/**/*
-# 忽略resources/images/target_images/yfcc4k目录下的所有文件
-resources/images/target_images/yfcc4k/**/*
+# 忽略myresources目录下的所有文件
+myresources/
 
 visulize.ipynb

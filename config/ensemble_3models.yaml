@@ -4,11 +4,14 @@ defaults:
   - _self_
 
 data:
-  batch_size: 1   # 每批次处理一张图
-  num_samples: 100  # 处理100张图
+  batch_size: 10   # 每批次处理一张图
+  num_samples: 1000  # 处理100张图
   output: "./LAT"  # 输出目录
-  cle_data_path: "resources/images/bigscale"  # 干净图像目录
-  tgt_data_path: "resources/images/target_images"  # 目标图像目录
+  # cle_data_path: "resources/images/bigscale"  # 干净图像目录
+  # tgt_data_path: "resources/images/target_images"  # 目标图像目录
+  # 自定义数据集
+  cle_data_path: "myresources/images/clean"  # 干净图像目录
+  tgt_data_path: "myresources/images/target_images"  # 目标图像目录
 
 optim:
   alpha: 1.0  # 步长

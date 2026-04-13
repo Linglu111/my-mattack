@@ -30,10 +30,9 @@ class DataConfig:
     cle_data_path: str = "resources/images/bigscale"
     tgt_data_path: str = "resources/images/target_images"
     output: str = "./img_output"
-    # # 地理数据集
-    # cle_data_path: str = "my_dataset/my_source"
-    # tgt_data_path: str = "my_dataset/my_target"
-    # output: str = "./img_output"
+    # # 自定义数据集
+    # cle_data_path: str = "myresources/images/clean"
+    # tgt_data_path: str = "myresources/images/target_images"
 
 
 @dataclass
