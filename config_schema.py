@@ -30,6 +30,7 @@ class DataConfig:
     cle_data_path: str = "resources/images/bigscale"
     tgt_data_path: str = "resources/images/target_images"
     output: str = "./img_output"
+    adv_img_dir: Optional[str] = None  # 直接指定对抗图像目录路径
     # # 自定义数据集
     # cle_data_path: str = "myresources/images/clean"
     # tgt_data_path: str = "myresources/images/target_images"
