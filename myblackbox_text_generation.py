@@ -80,7 +80,7 @@ class ImageDescriptionGenerator:
         media_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
 
         response = self.client.chat.completions.create(
-            model="doubao-seed-2-0-lite-260215",
+            model="doubao-1-5-vision-pro-32k-250115",
             messages=[
                 {
                     "role": "user",
@@ -111,7 +111,7 @@ class ImageDescriptionGenerator:
         media_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
 
         response = self.client.chat.completions.create(
-            model="qwen-vl-plus",
+            model="qwen2.5-vl-72b-instruct",
             messages=[
                 {
                     "role": "user",

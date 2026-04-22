@@ -169,13 +169,14 @@ def main(cfg: MainConfig):
     ensemble_loss = get_ensemble_loss(cfg, models)
 
     # ---- 步骤2: 图像预处理 ----
+    # 保留原始分辨率，只进行RGB转换和ToTensor
     transform_fn = transforms.Compose(
         [
-            transforms.Resize(
-                cfg.model.input_res,
-                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-            ),
-            transforms.CenterCrop(cfg.model.input_res),
+            # transforms.Resize(
+            #     cfg.model.input_res,
+            #     interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            # ),
+            # transforms.CenterCrop(cfg.model.input_res),
             transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.Lambda(lambda img: to_tensor(img)),
         ]
@@ -196,8 +197,9 @@ def main(cfg: MainConfig):
     print("Using target crop:", cfg.model.use_target_crop)
 
     # ---- 步骤4: 配置Local Matching裁剪策略 ----
-    # source_crop: 对对抗图像进行随机裁剪
-    # target_crop: 对目标图像进行随机裁剪
+    # source_crop: 对对抗图像进行随机裁剪（仅在启用时）
+    # target_crop: 对目标图像进行随机裁剪（仅在启用时）
+    # 注意：由于保留原始分辨率，裁剪操作在模型内部预处理时进行
     source_crop = (
         transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
         if cfg.model.use_source_crop

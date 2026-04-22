@@ -20,6 +20,8 @@ class ClipL336FeatureExtractor(BaseFeatureExtractor):
 
     def forward(self, x):
         # x = torch.clamp(x, min=0, max=1)
+        # 如果输入尺寸不是336x336，先进行resize和crop
+        # 这样可以在原始分辨率图像上添加扰动，只在模型前向传播时调整尺寸
         inputs = dict(pixel_values=self.normalizer(x))
         image_features = self.model.get_image_features(**inputs)
         image_features = image_features / image_features.norm(dim=1, keepdim=True)
