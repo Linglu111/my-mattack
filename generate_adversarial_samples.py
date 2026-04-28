@@ -27,6 +27,7 @@ from surrogates import (
     EnsembleFeatureLoss,
     EnsembleFeatureExtractor,
 )
+from surrogates.ggm_generator import GGMGenerator
 
 from utils import hash_training_config, setup_wandb, ensure_dir
 
@@ -254,17 +255,33 @@ def attack_imgpair(
         "fgsm": fgsm_attack,
         "mifgsm": mifgsm_attack,
         "pgd": pgd_attack,
+        "dca": dca_attack,
     }[attack_type]
-    adv_image = attack_fn(
-        cfg=cfg,
-        ensemble_extractor=ensemble_extractor,
-        ensemble_loss=ensemble_loss,
-        source_crop=source_crop,
-        target_crop=target_crop,
-        img_index=img_index,
-        image_org=image_org,
-        image_tgt=image_tgt,
-    )
+    
+    # 对于DCA攻击，需要传入额外参数
+    if attack_type == "dca":
+        adv_image = attack_fn(
+            cfg=cfg,
+            ensemble_extractor=ensemble_extractor,
+            ensemble_loss=ensemble_loss,
+            source_crop=source_crop,
+            target_crop=target_crop,
+            img_index=img_index,
+            image_org=image_org,
+            image_tgt=image_tgt,
+            path_org=path_org,
+        )
+    else:
+        adv_image = attack_fn(
+            cfg=cfg,
+            ensemble_extractor=ensemble_extractor,
+            ensemble_loss=ensemble_loss,
+            source_crop=source_crop,
+            target_crop=target_crop,
+            img_index=img_index,
+            image_org=image_org,
+            image_tgt=image_tgt,
+        )
 
     # Get config hash for output directory
     config_hash = hash_training_config(cfg)
@@ -421,7 +438,8 @@ def fgsm_attack(
     return adv_image
 
 
-def mifgsm_attack(
+
+def dca_attack(
     cfg: MainConfig,
     ensemble_extractor: nn.Module,
     ensemble_loss: nn.Module,
@@ -430,9 +448,13 @@ def mifgsm_attack(
     img_index: int,
     image_org: torch.Tensor,
     image_tgt: torch.Tensor,
+    path_org: List[str],
 ):
     """
-    Perform MI-FGSM attack on the image to generate adversarial examples.
+    Perform DCA (Decision-aware Cross-modal Attention Masking) attack.
+    
+    核心创新：使用CLIP跨模态梯度自动生成地理决策关键性掩码，
+    实现精准局部攻击，将扰动集中在对地理决策最关键的区域。
 
     Args:
         cfg: Configuration parameters
@@ -440,167 +462,166 @@ def mifgsm_attack(
         ensemble_loss: Ensemble loss function
         source_crop: Optional transform for cropping source images
         target_crop: Optional transform for cropping target images
-        i: Index of the image (for logging)
-        image_org: Original source image tensor
+        img_index: Index of the image (for logging)
+        image_org: Original source image tensor [B, C, H, W]
         image_tgt: Target image tensor to match features with
+        path_org: List of file paths for the images (used to extract geo labels)
 
     Returns:
         torch.Tensor: Generated adversarial image
     """
-    # # 初始化扰动
-    # 创建一个与image_org形状完全相同的全零张量，即需要优化的扰动
-    delta = torch.zeros_like(image_org, requires_grad=True) 
-    momentum = torch.zeros_like(image_org, requires_grad=False) #动量张量
-
-    # Progress bar for optimization
-    pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
-
-    # Main optimization loop
-    for epoch in pbar:
-
-        with torch.no_grad():
-            ensemble_loss.set_ground_truth(target_crop(image_tgt))
-
-        # Forward pass
-        adv_image = image_org + delta
-        adv_features = ensemble_extractor(adv_image)
-
-        # Calculate metrics
-        metrics = {
-            "max_delta": torch.max(torch.abs(delta)).item(),
-            "mean_delta": torch.mean(torch.abs(delta)).item(),
-        }
-
-        # Calculate loss based on configuration
-        global_sim = ensemble_loss(adv_features)    #计算对抗图像与目标图像的全局余弦相似度
-        metrics["global_similarity"] = global_sim.item()
-
-        if cfg.model.use_source_crop:
-            # If using source crop, calculate additional local similarity
-            local_cropped = source_crop(adv_image)  #局部随即裁剪
-            local_features = ensemble_extractor(local_cropped)  #提取局部特征
-            local_sim = ensemble_loss(local_features)   #计算局部余弦相似度
-            loss = local_sim
-            metrics["local_similarity"] = local_sim.item()
-        else:
-            # Otherwise use global similarity as loss
-            loss = global_sim
-
-        log_metrics(pbar, metrics, img_index, epoch)
-
-        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]  #计算梯度
-
-        # MI-FGSM update
-        momentum = momentum * 0.9 + grad    #使用动量更新
-        delta.data = torch.clamp(
-            delta + cfg.optim.alpha * torch.sign(momentum),
-            min=-cfg.optim.epsilon,
-            max=cfg.optim.epsilon,
-        )
-
-    # Create final adversarial image
-    adv_image = image_org + delta
-    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)    #归一化
-
-    # Log final perturbation metrics
-    final_metrics = {
-        "max_delta": torch.max(torch.abs(delta)).item(),
-        "mean_delta": torch.mean(torch.abs(delta)).item(),
-    }
-    log_metrics(pbar, final_metrics, img_index)
-
-    return adv_image
-
-
-def pgd_attack(
-    cfg: MainConfig,
-    ensemble_extractor: nn.Module,
-    ensemble_loss: nn.Module,
-    source_crop: Optional[transforms.RandomResizedCrop],
-    target_crop: Optional[transforms.RandomResizedCrop],
-    img_index: int,
-    image_org: torch.Tensor,
-    image_tgt: torch.Tensor,
-):
-    """
-    Perform PGD attack on the image to generate adversarial examples.
-
-    Args:
-        cfg: Configuration parameters
-        ensemble_extractor: Ensemble feature extractor model
-        ensemble_loss: Ensemble loss function
-        source_crop: Optional transform for cropping source images
-        target_crop: Optional transform for cropping target images
-        i: Index of the image (for logging)
-        image_org: Original source image tensor
-        image_tgt: Target image tensor to match features with
-
-    Returns:
-        torch.Tensor: Generated adversarial image
-    """
-    # Initialize perturbation and momentum
+    # 初始化GGM生成器
+    ggm_generator = GGMGenerator(
+        device=cfg.model.device,
+        sigma=cfg.dca.ggm_sigma if hasattr(cfg, 'dca') else 3.0
+    )
+    
+    # 从路径中提取地理标签（简化处理，实际应从metadata读取）
+    # 这里使用配置中的默认标签或从文件名解析
+    geo_label = getattr(cfg.dca, 'geo_label', 'this location') if hasattr(cfg, 'dca') else 'this location'
+    
+    # 为每个batch生成GGM掩码
+    batch_size = image_org.size(0)
+    masks = []
+    for b in range(batch_size):
+        # 生成掩码 [H, W]
+        mask = ggm_generator.generate_mask(image_org[b], geo_label)
+        masks.append(mask)
+    
+    # 堆叠掩码 [B, H, W]
+    M = torch.stack(masks, dim=0).to(cfg.model.device)
+    
+    # 初始化扰动和动量
     delta = torch.zeros_like(image_org, requires_grad=True)
-    optimizer = torch.optim.Adam([delta], lr=cfg.optim.alpha)   #Adam优化器
-
-    # Progress bar for optimization
-    pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
-
-    # Main optimization loop
+    momentum = torch.zeros_like(image_org, requires_grad=False)
+    
+    # 可选：初始化LPIPS模型
+    lpips_model = None
+    if hasattr(cfg, 'dca') and cfg.dca.use_lpips:
+        try:
+            import lpips
+            lpips_model = lpips.LPIPS(net='alex').to(cfg.model.device)
+            lpips_model.eval()
+        except ImportError:
+            print("Warning: lpips not installed, skipping perceptual loss")
+    
+    # Progress bar
+    pbar = tqdm(range(cfg.optim.steps), desc=f"DCA Attack progress")
+    
+    # 主优化循环
     for epoch in pbar:
-
         with torch.no_grad():
             ensemble_loss.set_ground_truth(target_crop(image_tgt))
-
-        # Forward pass
+        
+        # 前向传播
         adv_image = image_org + delta
         adv_features = ensemble_extractor(adv_image)
-
-        # Calculate metrics
+        
+        # 计算指标
         metrics = {
             "max_delta": torch.max(torch.abs(delta)).item(),
             "mean_delta": torch.mean(torch.abs(delta)).item(),
         }
-
-        # Calculate loss based on configuration
+        
+        # 计算对抗损失（最小化与目标特征的相似度）
         global_sim = ensemble_loss(adv_features)
         metrics["global_similarity"] = global_sim.item()
-
+        
+        # 基础损失：无向攻击（最小化相似度）
+        loss = -global_sim
+        
+        # 可选：添加LPIPS感知损失
+        if lpips_model is not None:
+            # LPIPS需要归一化到[0,1]
+            adv_normalized = torch.clamp(adv_image / 255.0, 0.0, 1.0)
+            org_normalized = torch.clamp(image_org / 255.0, 0.0, 1.0)
+            loss_lpips = lpips_model(adv_normalized, org_normalized).mean()
+            loss = loss + cfg.dca.lpips_weight * loss_lpips
+            metrics["lpips_loss"] = loss_lpips.item()
+        
+        # 可选：局部匹配
         if cfg.model.use_source_crop:
-            # If using source crop, calculate additional local similarity
             local_cropped = source_crop(adv_image)
             local_features = ensemble_extractor(local_cropped)
             local_sim = ensemble_loss(local_features)
-            loss = -local_sim # since we want to maximize the loss 最小化负相似度
+            loss = loss - local_sim  # 同时最小化局部相似度
             metrics["local_similarity"] = local_sim.item()
-        else:
-            # Otherwise use global similarity as loss
-            loss = -global_sim
-
+        
         log_metrics(pbar, metrics, img_index, epoch)
-
-        optimizer.zero_grad()
-        loss.backward()
-
-        # PGD update
-        optimizer.step()
+        
+        # 计算梯度
+        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
+        
+        # MI-FGSM更新（带掩码）
+        # 关键：扰动与掩码逐元素相乘，实现局部化
+        momentum = momentum * 0.9 + grad
+        
+        # 扩展掩码到与delta相同维度 [B, C, H, W]
+        M_expanded = M.unsqueeze(1).expand_as(delta)
+        
+        # 应用掩码：关键区域获得更多扰动预算
         delta.data = torch.clamp(
-            delta,
+            delta + cfg.optim.alpha * torch.sign(momentum) * M_expanded,
             min=-cfg.optim.epsilon,
             max=cfg.optim.epsilon,
         )
-
-    # Create final adversarial image
+    
+    # 生成最终对抗图像
     adv_image = image_org + delta
     adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
-
-    # Log final perturbation metrics
+    
+    # 保存GGM掩码可视化（第一个样本）
+    if img_index == 0 and masks:
+        save_ggm_visualization(image_org[0], masks[0], adv_image[0], cfg)
+    
+    # 记录最终指标
     final_metrics = {
         "max_delta": torch.max(torch.abs(delta)).item(),
         "mean_delta": torch.mean(torch.abs(delta)).item(),
     }
     log_metrics(pbar, final_metrics, img_index)
-
+    
     return adv_image
+
+
+def save_ggm_visualization(image_org, mask, adv_image, cfg):
+    """保存GGM掩码可视化结果"""
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    
+    # 原图
+    axes[0].imshow(image_org.cpu().permute(1, 2, 0).numpy() / 255.0)
+    axes[0].set_title("Original Image")
+    axes[0].axis('off')
+    
+    # GGM掩码
+    axes[1].imshow(mask.cpu().numpy(), cmap='hot')
+    axes[1].set_title("GGM Mask")
+    axes[1].axis('off')
+    
+    # 对抗图像
+    axes[2].imshow(adv_image.cpu().permute(1, 2, 0).numpy())
+    axes[2].set_title("Adversarial Image")
+    axes[2].axis('off')
+    
+    # 扰动放大
+    perturbation = (adv_image - image_org / 255.0).cpu().permute(1, 2, 0).numpy()
+    perturbation = (perturbation - perturbation.min()) / (perturbation.max() - perturbation.min() + 1e-8)
+    axes[3].imshow(perturbation)
+    axes[3].set_title("Perturbation (scaled)")
+    axes[3].axis('off')
+    
+    plt.tight_layout()
+    
+    # 保存
+    config_hash = hash_training_config(cfg)
+    vis_dir = os.path.join(cfg.data.output, "visualization", config_hash)
+    ensure_dir(vis_dir)
+    plt.savefig(os.path.join(vis_dir, "ggm_visualization.png"), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved GGM visualization to {vis_dir}/ggm_visualization.png")
 
 
 if __name__ == "__main__":

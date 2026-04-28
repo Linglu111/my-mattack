@@ -4,8 +4,8 @@ defaults:
   - _self_
 
 data:
-  batch_size: 10   # 每批次处理一张图
-  num_samples: 1000  # 处理100张图
+  batch_size: 1   # 每批次处理一张图
+  num_samples: 100  # 处理100张图
   output: "./LAT"  # 输出目录
   cle_data_path: "resources/images/bigscale"  # 干净图像目录
   tgt_data_path: "resources/images/target_images"  # 目标图像目录
@@ -19,7 +19,7 @@ optim:
   steps: 300  # 迭代步数
 
 model:
-  input_res: 224  # 输入图像分辨率
+  # input_res: 224  # 输入图像分辨率
   use_source_crop: true
   use_target_crop: true
   crop_scale: [0.5, 0.9] 
@@ -36,4 +36,13 @@ blackbox:
   batch_size: 1
   timeout: 30
 
-attack: 'fgsm' # [fgsm, mifgsm, pgd]  # 攻击方法选择
+attack: 'fgsm' # [fgsm, mifgsm, pgd, dca]  # 攻击方法选择
+
+# DCA配置（仅当attack='dca'时生效）
+dca:
+  use_ggm: true  # 启用GGM掩码
+  ggm_sigma: 3.0  # 高斯平滑参数
+  use_lpips: false  # 是否启用LPIPS感知损失（需要安装lpips包）
+  lpips_weight: 0.2  # LPIPS损失权重
+  geo_label: "this location"  # 地理标签，可从metadata动态获取
+  geo_prompt_template: "A photo taken in {geo_label}"  # 地理提示模板
