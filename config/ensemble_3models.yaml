@@ -36,7 +36,7 @@ blackbox:
   batch_size: 1
   timeout: 30
 
-attack: 'fgsm' # [fgsm, mifgsm, pgd, dca]  # 攻击方法选择
+attack: 'dca' # [fgsm, mifgsm, pgd, dca]  # 攻击方法选择
 
 # DCA配置（仅当attack='dca'时生效）
 dca:

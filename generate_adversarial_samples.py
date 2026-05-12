@@ -1,23 +1,17 @@
 import os
-import json
-import hashlib
 import random
-import torchvision.transforms as transforms
 import numpy as np
 import torch
 import torchvision
-from PIL import Image
-import hydra
-from omegaconf import DictConfig
-import os
-from config_schema import MainConfig
-from functools import partial
+import torchvision.transforms as transforms
 from typing import List, Dict, Optional
 from torch import nn
-from pytorch_lightning import seed_everything
-import wandb
-from omegaconf import OmegaConf
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
+import wandb
+
+from config_schema import MainConfig
 
 from surrogates import (
     ClipB16FeatureExtractor,
@@ -213,6 +207,26 @@ def main(cfg: MainConfig):
     )
 
     # ---- 步骤5: 主循环 — 逐对处理图像 ----
+    
+    # DCA攻击时，统一初始化GSDM生成器（只初始化一次，避免重复加载模型）
+    gsdm_generator = None
+    if cfg.attack == "dca":
+        gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
+        gsdm_generator = GSDMGenerator(
+            device=cfg.model.device,
+            box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
+            text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
+            mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
+        )
+    
+    # 统一参数：所有攻击函数接受相同参数集，path_org和gsdm_generator在不需要时忽略
+    attack_fn = {
+        "fgsm": fgsm_attack,
+        "mifgsm": mifgsm_attack,
+        "pgd": pgd_attack,
+        "dca": dca_attack,
+    }[cfg.attack]
+    
     for i, ((image_org, _, path_org), (image_tgt, _, path_tgt)) in enumerate(
         zip(data_loader_imagenet, data_loader_target)
     ):
@@ -226,11 +240,13 @@ def main(cfg: MainConfig):
             ensemble_extractor=ensemble_extractor,
             ensemble_loss=ensemble_loss,
             source_crop=source_crop,
+            target_crop=target_crop,
             img_index=i,
             image_org=image_org,
             path_org=path_org,
             image_tgt=image_tgt,
-            target_crop=target_crop,
+            attack_fn=attack_fn,
+            gsdm_generator=gsdm_generator,
         )
 
     wandb.finish()
@@ -246,78 +262,37 @@ def attack_imgpair(
     image_org: torch.Tensor,
     path_org: List[str],
     image_tgt: torch.Tensor,
+    attack_fn,
+    gsdm_generator=None,
 ):
-    image_org, image_tgt = image_org.to(cfg.model.device), image_tgt.to(
-        cfg.model.device
-    )
-    attack_type = cfg.attack
-    attack_fn = {
-        "fgsm": fgsm_attack,
-        "mifgsm": mifgsm_attack,
-        "pgd": pgd_attack,
-        "dca": dca_attack,
-    }[attack_type]
-    
-    # 对于DCA攻击，需要传入额外参数
-    if attack_type == "dca":
-        adv_image = attack_fn(
-            cfg=cfg,
-            ensemble_extractor=ensemble_extractor,
-            ensemble_loss=ensemble_loss,
-            source_crop=source_crop,
-            target_crop=target_crop,
-            img_index=img_index,
-            image_org=image_org,
-            image_tgt=image_tgt,
-            path_org=path_org,
-        )
-    else:
-        adv_image = attack_fn(
-            cfg=cfg,
-            ensemble_extractor=ensemble_extractor,
-            ensemble_loss=ensemble_loss,
-            source_crop=source_crop,
-            target_crop=target_crop,
-            img_index=img_index,
-            image_org=image_org,
-            image_tgt=image_tgt,
-        )
+    image_org, image_tgt = image_org.to(cfg.model.device), image_tgt.to(cfg.model.device)
 
-    # Get config hash for output directory
+    adv_image = attack_fn(
+        cfg=cfg,
+        ensemble_extractor=ensemble_extractor,
+        ensemble_loss=ensemble_loss,
+        source_crop=source_crop,
+        target_crop=target_crop,
+        img_index=img_index,
+        image_org=image_org,
+        image_tgt=image_tgt,
+        gsdm_generator=gsdm_generator,
+    )
+
     config_hash = hash_training_config(cfg)
 
-    # Save images
     for path_idx in range(len(path_org)):
-        # folder, name = (
-        #     path_org[path_idx].split("/")[-2],
-        #     path_org[path_idx].split("/")[-1],
-        # )
-        # 使用os.path模块来正确处理路径，而不是简单的字符串分割
         folder = os.path.basename(os.path.dirname(path_org[path_idx]))
         name = os.path.basename(path_org[path_idx])
-        
-        # Use config hash in output path
         folder_to_save = os.path.join(cfg.data.output, "img", config_hash, folder)
         ensure_dir(folder_to_save)
 
-        # Get file extension and make it lowercase for case-insensitive check
         ext = os.path.splitext(name)[1].lower()
-        
         if ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
-            # For JPEG files, convert to PNG
-            if ext in [".jpg", ".jpeg"]:
-                save_name = os.path.splitext(name)[0] + ".png"
-            else:
-                save_name = name
-            
-            torchvision.utils.save_image(
-                adv_image[path_idx], os.path.join(folder_to_save, save_name)
-            )
+            save_name = os.path.splitext(name)[0] + ".png" if ext in [".jpg", ".jpeg"] else name
+            torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, save_name))
         else:
-            # Save with original extension if not recognized
-            torchvision.utils.save_image(
-                adv_image[path_idx], os.path.join(folder_to_save, name)
-            )
+            torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, name))
 
 
 def log_metrics(pbar, metrics, img_index, epoch=None):
@@ -354,6 +329,7 @@ def fgsm_attack(
     img_index: int,
     image_org: torch.Tensor,
     image_tgt: torch.Tensor,
+    gsdm_generator=None,
 ):
     """
     Perform FGSM attack on the image to generate adversarial examples.
@@ -438,6 +414,22 @@ def fgsm_attack(
     return adv_image
 
 
+def mifgsm_attack(
+    cfg, ensemble_extractor, ensemble_loss,
+    source_crop, target_crop, img_index,
+    image_org, image_tgt, gsdm_generator=None,
+):
+    raise NotImplementedError("MI-FGSM attack not yet implemented. Use 'dca' for GSDM-based attack.")
+
+
+def pgd_attack(
+    cfg, ensemble_extractor, ensemble_loss,
+    source_crop, target_crop, img_index,
+    image_org, image_tgt, gsdm_generator=None,
+):
+    raise NotImplementedError("PGD attack not yet implemented. Use 'dca' for GSDM-based attack.")
+
+
 
 def dca_attack(
     cfg: MainConfig,
@@ -448,55 +440,23 @@ def dca_attack(
     img_index: int,
     image_org: torch.Tensor,
     image_tgt: torch.Tensor,
-    path_org: List[str],
+    gsdm_generator=None,
 ):
-    """
-    Perform DCA (Decision-aware Cross-modal Attention Masking) attack.
-    
-    核心创新：使用CLIP跨模态梯度自动生成地理决策关键性掩码，
-    实现精准局部攻击，将扰动集中在对地理决策最关键的区域。
+    if gsdm_generator is None:
+        raise ValueError("DCA attack requires GSDMGenerator")
 
-    Args:
-        cfg: Configuration parameters
-        ensemble_extractor: Ensemble feature extractor model
-        ensemble_loss: Ensemble loss function
-        source_crop: Optional transform for cropping source images
-        target_crop: Optional transform for cropping target images
-        img_index: Index of the image (for logging)
-        image_org: Original source image tensor [B, C, H, W]
-        image_tgt: Target image tensor to match features with
-        path_org: List of file paths for the images (used to extract geo labels)
+    geo_label = getattr(cfg.dca, 'geo_label', None)
 
-    Returns:
-        torch.Tensor: Generated adversarial image
-    """
-    # 初始化GSDM生成器（GroundingDINO + SAM）
-    gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
-    gsdm_generator = GSDMGenerator(
-        device=cfg.model.device,
-        box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
-        text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
-        mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
-    )
-    
-    # 从路径中提取地理标签（简化处理，实际应从metadata读取）
-    geo_label = getattr(cfg.dca, 'geo_label', None) if hasattr(cfg, 'dca') else None
-    
-    # 为每个batch生成GSDM掩码
     batch_size = image_org.size(0)
     masks = []
     for b in range(batch_size):
         mask = gsdm_generator.generate_mask(image_org[b], geo_label)
         masks.append(mask)
-    
-    # 堆叠掩码 [B, H, W]
     M = torch.stack(masks, dim=0).to(cfg.model.device)
-    
-    # 初始化扰动和动量
+
     delta = torch.zeros_like(image_org, requires_grad=True)
     momentum = torch.zeros_like(image_org, requires_grad=False)
-    
-    # 可选：初始化LPIPS模型
+
     lpips_model = None
     if hasattr(cfg, 'dca') and cfg.dca.use_lpips:
         try:
@@ -505,83 +465,63 @@ def dca_attack(
             lpips_model.eval()
         except ImportError:
             print("Warning: lpips not installed, skipping perceptual loss")
-    
-    # Progress bar
+
     pbar = tqdm(range(cfg.optim.steps), desc=f"DCA Attack progress")
-    
-    # 主优化循环
+
     for epoch in pbar:
         with torch.no_grad():
             ensemble_loss.set_ground_truth(target_crop(image_tgt))
-        
-        # 前向传播
+
         adv_image = image_org + delta
         adv_features = ensemble_extractor(adv_image)
-        
-        # 计算指标
+
         metrics = {
             "max_delta": torch.max(torch.abs(delta)).item(),
             "mean_delta": torch.mean(torch.abs(delta)).item(),
         }
-        
-        # 计算对抗损失（最小化与目标特征的相似度）
+
         global_sim = ensemble_loss(adv_features)
         metrics["global_similarity"] = global_sim.item()
-        
-        # 基础损失：无向攻击（最小化相似度）
-        loss = -global_sim
-        
-        # 可选：添加LPIPS感知损失
+        loss = -global_sim  # 无向攻击
+
         if lpips_model is not None:
-            # LPIPS需要归一化到[0,1]
             adv_normalized = torch.clamp(adv_image / 255.0, 0.0, 1.0)
             org_normalized = torch.clamp(image_org / 255.0, 0.0, 1.0)
             loss_lpips = lpips_model(adv_normalized, org_normalized).mean()
             loss = loss + cfg.dca.lpips_weight * loss_lpips
             metrics["lpips_loss"] = loss_lpips.item()
-        
-        # 可选：局部匹配
+
         if cfg.model.use_source_crop:
             local_cropped = source_crop(adv_image)
             local_features = ensemble_extractor(local_cropped)
             local_sim = ensemble_loss(local_features)
-            loss = loss - local_sim  # 同时最小化局部相似度
+            loss = loss - local_sim
             metrics["local_similarity"] = local_sim.item()
-        
+
         log_metrics(pbar, metrics, img_index, epoch)
-        
-        # 计算梯度
+
         grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
-        
-        # MI-FGSM更新（带掩码）
-        # 关键：扰动与掩码逐元素相乘，实现局部化
         momentum = momentum * 0.9 + grad
-        
-        # 扩展掩码到与delta相同维度 [B, C, H, W]
         M_expanded = M.unsqueeze(1).expand_as(delta)
-        
-        # 应用掩码：关键区域获得更多扰动预算
+
         delta.data = torch.clamp(
             delta + cfg.optim.alpha * torch.sign(momentum) * M_expanded,
             min=-cfg.optim.epsilon,
             max=cfg.optim.epsilon,
         )
-    
-    # 生成最终对抗图像
+
     adv_image = image_org + delta
     adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
-    
-    # 保存GSDM掩码可视化（第一个样本）
+
     if img_index == 0 and masks:
         save_gsdm_visualization(image_org[0], masks[0], adv_image[0], cfg)
-    
-    # 记录最终指标
+
     final_metrics = {
         "max_delta": torch.max(torch.abs(delta)).item(),
         "mean_delta": torch.mean(torch.abs(delta)).item(),
     }
     log_metrics(pbar, final_metrics, img_index)
-    
+
     return adv_image
 
 
@@ -591,22 +531,18 @@ def save_gsdm_visualization(image_org, mask, adv_image, cfg):
     
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
-    # 原图
     axes[0].imshow(image_org.cpu().permute(1, 2, 0).numpy() / 255.0)
     axes[0].set_title("Original Image")
     axes[0].axis('off')
     
-    # GGM掩码
     axes[1].imshow(mask.cpu().numpy(), cmap='hot')
-    axes[1].set_title("GGM Mask")
+    axes[1].set_title("GSDM Mask (Geo-Saliency)")
     axes[1].axis('off')
     
-    # 对抗图像
     axes[2].imshow(adv_image.cpu().permute(1, 2, 0).numpy())
     axes[2].set_title("Adversarial Image")
     axes[2].axis('off')
     
-    # 扰动放大
     perturbation = (adv_image - image_org / 255.0).cpu().permute(1, 2, 0).numpy()
     perturbation = (perturbation - perturbation.min()) / (perturbation.max() - perturbation.min() + 1e-8)
     axes[3].imshow(perturbation)
@@ -615,14 +551,13 @@ def save_gsdm_visualization(image_org, mask, adv_image, cfg):
     
     plt.tight_layout()
     
-    # 保存
     config_hash = hash_training_config(cfg)
     vis_dir = os.path.join(cfg.data.output, "visualization", config_hash)
     ensure_dir(vis_dir)
-    plt.savefig(os.path.join(vis_dir, "ggm_visualization.png"), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(vis_dir, "gsdm_visualization.png"), dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"Saved GGM visualization to {vis_dir}/ggm_visualization.png")
+    print(f"Saved GSDM visualization to {vis_dir}/gsdm_visualization.png")
 
 
 if __name__ == "__main__":
