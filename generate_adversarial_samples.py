@@ -462,12 +462,17 @@ def dca_attack(
     batch_size = image_org.size(0)
     masks = []
     for b in range(batch_size):
-        mask = gsdm_generator.generate_mask(image_org[b], geo_label)
+        result = gsdm_generator.generate_mask(image_org[b], geo_label, return_visualization=True)
+        if isinstance(result, tuple):
+            mask, vis_data = result
+            if vis_data.get("fallback"):
+                print(f"  [GSDM] Image {b}: no geo-features detected → uniform mask (standard attack)")
+        else:
+            mask = result
         masks.append(mask)
     M = torch.stack(masks, dim=0).to(cfg.model.device)
 
     delta = torch.zeros_like(image_org, requires_grad=True)
-    momentum = torch.zeros_like(image_org, requires_grad=False)
 
     lpips_model = None
     if hasattr(cfg, 'dca') and cfg.dca.use_lpips:
@@ -513,11 +518,10 @@ def dca_attack(
         log_metrics(pbar, metrics, img_index, epoch)
 
         grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
-        momentum = momentum * 0.9 + grad
         M_expanded = M.unsqueeze(1).expand_as(delta)
 
         delta.data = torch.clamp(
-            delta + cfg.optim.alpha * torch.sign(momentum) * M_expanded,
+            delta + cfg.optim.alpha * torch.sign(grad) * M_expanded,
             min=-cfg.optim.epsilon,
             max=cfg.optim.epsilon,
         )

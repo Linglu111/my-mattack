@@ -13,7 +13,12 @@ GEO_DETECT_CLASSES = (
     "building. architecture. street sign. traffic sign. landmark. "
     "storefront. billboard. bridge. statue. tower. temple. church. "
     "mosque. monument. fountain. sculpture. clock tower. dome. minaret. "
-    "pagoda. archway. gate. pillar. column. facade."
+    "pagoda. archway. gate. pillar. column. facade. "
+    "tree. forest. mountain. hill. river. lake. ocean. coastline. "
+    "road. highway. intersection. crosswalk. traffic light. sidewalk. "
+    "vehicle. car. bus. bicycle. boat. train. airplane. "
+    "sign. banner. flag. mural. graffiti. poster. display. "
+    "person. crowd. market stall. umbrella. bench. fence. wall."
 )
 
 
@@ -136,11 +141,11 @@ class GSDMGenerator:
         with torch.no_grad():
             boxes, confidences = self._detect_with_grounding_dino(pil_image)
 
-        # 若未检出任何目标，返回全零掩码（表示无地理显著区域）
+        # 未检出地理目标时：回退为均匀掩码（等价于标准MI-FGSM全局攻击）
         if len(boxes) == 0:
-            mask = torch.zeros(original_size[::-1], device=self.device)
+            mask = torch.ones(original_size[::-1], device=self.device)
             if return_visualization:
-                return mask, {"boxes": [], "mask": mask}
+                return mask, {"boxes": [], "confidences": [], "num_instances": 0, "mask": mask, "fallback": True}
             return mask
 
         # Stage 2: SAM 将检测框细化为像素级掩码
