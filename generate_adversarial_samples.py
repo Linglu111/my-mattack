@@ -227,6 +227,8 @@ def main(cfg: MainConfig):
         "dca": dca_attack,
     }[cfg.attack]
     
+    config_hash = hash_training_config(cfg)
+    
     for i, ((image_org, _, path_org), (image_tgt, _, path_tgt)) in enumerate(
         zip(data_loader_imagenet, data_loader_target)
     ):
@@ -247,6 +249,7 @@ def main(cfg: MainConfig):
             image_tgt=image_tgt,
             attack_fn=attack_fn,
             gsdm_generator=gsdm_generator,
+            config_hash=config_hash,
         )
 
     wandb.finish()
@@ -264,10 +267,11 @@ def attack_imgpair(
     image_tgt: torch.Tensor,
     attack_fn,
     gsdm_generator=None,
+    config_hash: str = "",
 ):
     image_org, image_tgt = image_org.to(cfg.model.device), image_tgt.to(cfg.model.device)
 
-    adv_image = attack_fn(
+    adv_image, masks = attack_fn(
         cfg=cfg,
         ensemble_extractor=ensemble_extractor,
         ensemble_loss=ensemble_loss,
@@ -278,8 +282,6 @@ def attack_imgpair(
         image_tgt=image_tgt,
         gsdm_generator=gsdm_generator,
     )
-
-    config_hash = hash_training_config(cfg)
 
     for path_idx in range(len(path_org)):
         folder = os.path.basename(os.path.dirname(path_org[path_idx]))
@@ -293,6 +295,16 @@ def attack_imgpair(
             torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, save_name))
         else:
             torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, name))
+
+        # 为每张图同步保存GSDM掩码可视化
+        if masks and path_idx < len(masks):
+            vis_dir = os.path.join(cfg.data.output, "visualization", config_hash, folder)
+            ensure_dir(vis_dir)
+            save_name_base = os.path.splitext(name)[0]
+            save_gsdm_visualization(
+                image_org[path_idx], masks[path_idx], adv_image[path_idx],
+                os.path.join(vis_dir, f"{save_name_base}_gsdm.png")
+            )
 
 
 def log_metrics(pbar, metrics, img_index, epoch=None):
@@ -411,7 +423,7 @@ def fgsm_attack(
     }
     log_metrics(pbar, final_metrics, img_index)
 
-    return adv_image
+    return adv_image, []
 
 
 def mifgsm_attack(
@@ -513,19 +525,16 @@ def dca_attack(
     adv_image = image_org + delta
     adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
 
-    if img_index == 0 and masks:
-        save_gsdm_visualization(image_org[0], masks[0], adv_image[0], cfg)
-
     final_metrics = {
         "max_delta": torch.max(torch.abs(delta)).item(),
         "mean_delta": torch.mean(torch.abs(delta)).item(),
     }
     log_metrics(pbar, final_metrics, img_index)
 
-    return adv_image
+    return adv_image, masks
 
 
-def save_gsdm_visualization(image_org, mask, adv_image, cfg):
+def save_gsdm_visualization(image_org, mask, adv_image, save_path):
     """保存GSDM掩码可视化结果"""
     import matplotlib.pyplot as plt
     
@@ -550,14 +559,8 @@ def save_gsdm_visualization(image_org, mask, adv_image, cfg):
     axes[3].axis('off')
     
     plt.tight_layout()
-    
-    config_hash = hash_training_config(cfg)
-    vis_dir = os.path.join(cfg.data.output, "visualization", config_hash)
-    ensure_dir(vis_dir)
-    plt.savefig(os.path.join(vis_dir, "gsdm_visualization.png"), dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    
-    print(f"Saved GSDM visualization to {vis_dir}/gsdm_visualization.png")
 
 
 if __name__ == "__main__":
