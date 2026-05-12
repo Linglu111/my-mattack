@@ -198,9 +198,9 @@ class GSDMGenerator:
         results = self.gd_processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
-            box_threshold=self.box_threshold,
+            threshold=self.box_threshold,
             text_threshold=self.text_threshold,
-            target_sizes=[pil_image.size[::-1]],  # (W, H) -> (H, W)
+            target_sizes=[pil_image.size[::-1]],
         )
 
         result = results[0]  # 单张图像，取第一个结果

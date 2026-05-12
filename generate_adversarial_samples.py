@@ -302,7 +302,7 @@ def attack_imgpair(
             ensure_dir(vis_dir)
             save_name_base = os.path.splitext(name)[0]
             save_gsdm_visualization(
-                image_org[path_idx], masks[path_idx], adv_image[path_idx],
+                image_org[path_idx].detach(), masks[path_idx].detach(), adv_image[path_idx].detach(),
                 os.path.join(vis_dir, f"{save_name_base}_gsdm.png")
             )
 
