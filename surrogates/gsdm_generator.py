@@ -416,9 +416,11 @@ def test_gsdm():
     axes[2].set_title("Overlay")
     axes[2].axis("off")
 
+    os.makedirs("LAT/gsdm", exist_ok=True)
+    save_path = "LAT/gsdm/gsdm_test_result.png"
     plt.tight_layout()
-    plt.savefig("gsdm_test_result.png", dpi=150, bbox_inches="tight")
-    print("Saved visualization to gsdm_test_result.png")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"Saved visualization to {save_path}")
 
 
 if __name__ == "__main__":
