@@ -27,7 +27,7 @@ from surrogates import (
     EnsembleFeatureLoss,
     EnsembleFeatureExtractor,
 )
-from surrogates.ggm_generator import GGMGenerator
+from surrogates.gsdm_generator import GSDMGenerator
 
 from utils import hash_training_config, setup_wandb, ensure_dir
 
@@ -470,22 +470,23 @@ def dca_attack(
     Returns:
         torch.Tensor: Generated adversarial image
     """
-    # 初始化GGM生成器
-    ggm_generator = GGMGenerator(
+    # 初始化GSDM生成器（GroundingDINO + SAM）
+    gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
+    gsdm_generator = GSDMGenerator(
         device=cfg.model.device,
-        sigma=cfg.dca.ggm_sigma if hasattr(cfg, 'dca') else 3.0
+        box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
+        text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
+        mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
     )
     
     # 从路径中提取地理标签（简化处理，实际应从metadata读取）
-    # 这里使用配置中的默认标签或从文件名解析
-    geo_label = getattr(cfg.dca, 'geo_label', 'this location') if hasattr(cfg, 'dca') else 'this location'
+    geo_label = getattr(cfg.dca, 'geo_label', None) if hasattr(cfg, 'dca') else None
     
-    # 为每个batch生成GGM掩码
+    # 为每个batch生成GSDM掩码
     batch_size = image_org.size(0)
     masks = []
     for b in range(batch_size):
-        # 生成掩码 [H, W]
-        mask = ggm_generator.generate_mask(image_org[b], geo_label)
+        mask = gsdm_generator.generate_mask(image_org[b], geo_label)
         masks.append(mask)
     
     # 堆叠掩码 [B, H, W]
@@ -570,9 +571,9 @@ def dca_attack(
     adv_image = image_org + delta
     adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)
     
-    # 保存GGM掩码可视化（第一个样本）
+    # 保存GSDM掩码可视化（第一个样本）
     if img_index == 0 and masks:
-        save_ggm_visualization(image_org[0], masks[0], adv_image[0], cfg)
+        save_gsdm_visualization(image_org[0], masks[0], adv_image[0], cfg)
     
     # 记录最终指标
     final_metrics = {
@@ -584,8 +585,8 @@ def dca_attack(
     return adv_image
 
 
-def save_ggm_visualization(image_org, mask, adv_image, cfg):
-    """保存GGM掩码可视化结果"""
+def save_gsdm_visualization(image_org, mask, adv_image, cfg):
+    """保存GSDM掩码可视化结果"""
     import matplotlib.pyplot as plt
     
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))

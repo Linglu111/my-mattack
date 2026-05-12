@@ -40,9 +40,11 @@ attack: 'fgsm' # [fgsm, mifgsm, pgd, dca]  # 攻击方法选择
 
 # DCA配置（仅当attack='dca'时生效）
 dca:
-  use_ggm: true  # 启用GGM掩码
-  ggm_sigma: 3.0  # 高斯平滑参数
-  use_lpips: false  # 是否启用LPIPS感知损失（需要安装lpips包）
-  lpips_weight: 0.2  # LPIPS损失权重
-  geo_label: "this location"  # 地理标签，可从metadata动态获取
-  geo_prompt_template: "A photo taken in {geo_label}"  # 地理提示模板
+  use_gsdm: true
+  gsdm:
+    box_threshold: 0.25
+    text_threshold: 0.20
+    mask_fusion: "union"
+  use_lpips: false
+  lpips_weight: 0.2
+  geo_label: null
