@@ -164,13 +164,14 @@ def main(cfg: MainConfig):
     ensemble_loss = get_ensemble_loss(cfg, models)
 
     # ---- 步骤2: 图像预处理 ----
+    # 保留原始分辨率，只进行RGB转换和ToTensor
     transform_fn = transforms.Compose(
         [
-            transforms.Resize(
-                cfg.model.input_res,
-                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-            ),
-            transforms.CenterCrop(cfg.model.input_res),
+            # transforms.Resize(
+            #     cfg.model.input_res,
+            #     interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            # ),
+            # transforms.CenterCrop(cfg.model.input_res),
             transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.Lambda(lambda img: to_tensor(img)),
         ]
