@@ -6,19 +6,16 @@ from PIL import Image
 from pathlib import Path
 
 
-# 开放式检测提示词定义
-# GroundingDINO 是开放式词汇检测器，这里用自然语言描述所有与"地理"相关的
-# 视觉元素类别。用句号分隔每个类别，模型会同时检测这些概念。
+# 地理显著性检测类别
+# 原则：只保留能够唯一标识地理位置的视觉元素，排除树木/道路/车辆等通用场景元素
+# 1. 文化/宗教建筑：不同地区独有的建筑风格（寺庙=东亚，清真寺=中东，教堂=欧美）
+# 2. 地标/纪念碑：通常仅存在于特定城市或地点
+# 3. 含文字标识：路牌、店招等包含本地语言文字，直接暴露位置
 GEO_DETECT_CLASSES = (
-    "building. architecture. street sign. traffic sign. landmark. "
-    "storefront. billboard. bridge. statue. tower. temple. church. "
-    "mosque. monument. fountain. sculpture. clock tower. dome. minaret. "
-    "pagoda. archway. gate. pillar. column. facade. "
-    "tree. forest. mountain. hill. river. lake. ocean. coastline. "
-    "road. highway. intersection. crosswalk. traffic light. sidewalk. "
-    "vehicle. car. bus. bicycle. boat. train. airplane. "
-    "sign. banner. flag. mural. graffiti. poster. display. "
-    "person. crowd. market stall. umbrella. bench. fence. wall."
+    "temple. church. mosque. pagoda. dome. minaret. clock tower. "
+    "statue. monument. fountain. sculpture. archway. gate. "
+    "bridge. tower. facade. column. "
+    "street sign. traffic sign. storefront. billboard. banner. license plate. "
 )
 
 
