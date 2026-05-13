@@ -15,11 +15,11 @@ data:
 
 optim:
   alpha: 1.0  # 步长
-  epsilon: 16  # 扰动上限（像素值）
-  steps: 300  # 迭代步数
+  epsilon: 8  # 扰动上限（像素值）
+  steps: 100  # 迭代步数
 
 model:
-  # input_res: 224  # 输入图像分辨率
+  input_res: 640  # 输入图像分辨率
   use_source_crop: true
   use_target_crop: true
   crop_scale: [0.5, 0.9] 
