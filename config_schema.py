@@ -65,17 +65,10 @@ class ModelConfig:
 
 @dataclass
 class GSDMConfig:
-    """GSDM (Geo-Saliency Detection and Masking) parameters"""
+    """GSDM (Geo-Saliency Detection and Masking) parameters — DINOv2 + SAM"""
 
-    box_threshold: float = 0.25  # GroundingDINO检测框置信度阈值
-    text_threshold: float = 0.20  # GroundingDINO文本匹配阈值
-    detect_classes: str = (
-        "building. architecture. street sign. traffic sign. landmark. "
-        "storefront. billboard. bridge. statue. tower. temple. church. "
-        "mosque. monument. fountain. sculpture. clock tower. dome. minaret. "
-        "pagoda. archway. gate. pillar. column. facade."
-    )
-    mask_fusion: str = "union"  # 掩码融合策略 [union, weighted, max]
+    dinov2_model: str = "dinov2_vits14"  # DINOv2 模型版本: dinov2_vits14 / vitb14 / vitl14 / vitg14
+    use_sam_refine: bool = True  # 是否启用 SAM 像素级细化
 
 
 @dataclass

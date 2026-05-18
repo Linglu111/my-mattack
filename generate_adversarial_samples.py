@@ -178,9 +178,8 @@ def main(cfg: MainConfig):
     gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
     gsdm_generator = GSDMGenerator(
         device=cfg.model.device,
-        box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
-        text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
-        mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
+        dinov2_model=getattr(gsdm_cfg, 'dinov2_model', 'dinov2_vits14'),
+        use_sam_refine=getattr(gsdm_cfg, 'use_sam_refine', True),
     )
 
     config_hash = hash_training_config(cfg)

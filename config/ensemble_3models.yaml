@@ -35,9 +35,8 @@ attack: 'dca'  # 攻击方法固定为 dca (Feature Dispersion 无向攻击)
 dca:
   use_gsdm: true
   gsdm:
-    box_threshold: 0.25
-    text_threshold: 0.20
-    mask_fusion: "union"
+    dinov2_model: "dinov2_vits14"
+    use_sam_refine: true
   use_lpips: false
   lpips_weight: 0.2
   geo_label: null

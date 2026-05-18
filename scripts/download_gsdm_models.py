@@ -1,7 +1,9 @@
 """
 GSDM 模型下载脚本
 
-自动下载 GroundingDINO 和 SAM 模型权重到本地缓存。
+自动下载 DINOv2 和 SAM 模型权重到本地缓存。
+由于 DINOv2 由 transformers 的 from_pretrained 自动缓存，
+此脚本主要处理 SAM 大权重文件的预下载。
 """
 
 import os
@@ -9,23 +11,18 @@ import sys
 from pathlib import Path
 
 
-def download_grounding_dino():
-    print("Downloading GroundingDINO model...")
+def download_dinov2():
+    print("Downloading DINOv2 model (ViT-S/14)...")
     import os
-    # 使用 Hugging Face 镜像站（国内服务器）
     if not os.environ.get("HF_ENDPOINT"):
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
         print("Using HF mirror: https://hf-mirror.com")
-    from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+    from transformers import AutoImageProcessor, AutoModel
 
-    model_id = "IDEA-Research/grounding-dino-base"
-    kwargs = {
-        "force_download": True,
-        "trust_remote_code": True,
-    }
-    processor = AutoProcessor.from_pretrained(model_id, **kwargs)
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, **kwargs)
-    print(f"GroundingDINO model cached.")
+    model_id = "facebook/dinov2-small"
+    processor = AutoImageProcessor.from_pretrained(model_id)
+    model = AutoModel.from_pretrained(model_id)
+    print(f"DINOv2 model cached.")
 
 
 def download_sam_checkpoint():
@@ -43,7 +40,6 @@ def download_sam_checkpoint():
 
     import urllib.request
 
-    # 主 URL 和镜像 URL
     url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
     mirror_urls = [
         "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/sam_vit_h_4b8939.pth",
@@ -67,26 +63,25 @@ def download_sam_checkpoint():
             last_error = e
             print(f"\nFailed to download from {try_url}: {e}")
             if checkpoint_path.exists():
-                checkpoint_path.unlink()  # 删除不完整的文件
+                checkpoint_path.unlink()
     raise RuntimeError(f"All download sources failed. Last error: {last_error}")
 
 
 def test_models():
     print("\nVerifying models...")
 
-    print("1. Testing GroundingDINO...")
-    from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+    print("1. Testing DINOv2...")
+    from transformers import AutoImageProcessor, AutoModel
 
     device = "cuda:0" if __import__("torch").cuda.is_available() else "cpu"
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(
-        "IDEA-Research/grounding-dino-base",
-        trust_remote_code=True,
-    ).to(device)
-    print("   OK - GroundingDINO loaded successfully")
+    model = AutoModel.from_pretrained("facebook/dinov2-small").to(device)
+    model.eval()
+    print("   OK - DINOv2 loaded successfully")
 
     print("2. Testing SAM...")
     checkpoint = download_sam_checkpoint()
     from segment_anything import sam_model_registry
+
     sam = sam_model_registry["vit_h"](checkpoint=checkpoint)
     print("   OK - SAM loaded successfully")
 
@@ -97,8 +92,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         test_models()
     else:
-        print("GSDM Model Downloader")
+        print("GSDM Model Downloader (DINOv2 + SAM)")
         print("=" * 50)
-        download_grounding_dino()
+        download_dinov2()
         download_sam_checkpoint()
         print("\nModels downloaded. Run with --test to verify.")
