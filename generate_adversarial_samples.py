@@ -4,10 +4,8 @@ import numpy as np
 import torch
 import torchvision
 import torchvision.transforms as transforms
-from typing import List, Dict, Optional
 from torch import nn
 import hydra
-from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import wandb
 
@@ -31,7 +29,7 @@ from utils import hash_training_config, setup_wandb, ensure_dir
 # - B16:  CLIP ViT-B/16 (小模型，速度快)
 # - B32:  CLIP ViT-B/32 (小模型，更粗粒度)
 # - Laion: CLIP在LAION数据集上微调的版本
-BACKBONE_MAP: Dict[str, type] = {
+BACKBONE_MAP: dict[str, type] = {
     "L336": ClipL336FeatureExtractor,
     "B16": ClipB16FeatureExtractor,
     "B32": ClipB32FeatureExtractor,
@@ -85,7 +83,7 @@ def get_models(cfg: MainConfig):
     return ensemble_extractor, models
 
 
-def get_ensemble_loss(cfg: MainConfig, models: List[nn.Module]):
+def get_ensemble_loss(cfg: MainConfig, models: list[nn.Module]):
     # 将多个模型传入EnsembleFeatureLoss，用于计算对抗图像特征与目标特征的余弦相似度损失
     ensemble_loss = EnsembleFeatureLoss(models)
     return ensemble_loss
@@ -153,155 +151,79 @@ class ImageFolderWithPaths(torchvision.datasets.ImageFolder):
 def main(cfg: MainConfig):
     set_environment()
 
-    # Initialize wandb using shared utility
     setup_wandb(cfg, tags=["image_generation"])
-    # Define metrics relationship for logging multiple images
     wandb.define_metric("epoch")
     wandb.define_metric("*", step_metric="epoch")
 
-    # ---- 步骤1: 初始化代理模型 ----
     ensemble_extractor, models = get_models(cfg)
     ensemble_loss = get_ensemble_loss(cfg, models)
 
-    # ---- 步骤2: 图像预处理 ----
-    # 保留原始分辨率，只进行RGB转换和ToTensor
     transform_fn = transforms.Compose(
         [
-            # transforms.Resize(
-            #     cfg.model.input_res,
-            #     interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-            # ),
-            # transforms.CenterCrop(cfg.model.input_res),
+            transforms.Resize(
+                cfg.model.input_res,
+                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            ),
+            transforms.CenterCrop(cfg.model.input_res),
             transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.Lambda(lambda img: to_tensor(img)),
         ]
     )
 
-    # ---- 步骤3: 加载数据集 ----
     clean_data = ImageFolderWithPaths(cfg.data.cle_data_path, transform=transform_fn)
-    target_data = ImageFolderWithPaths(cfg.data.tgt_data_path, transform=transform_fn)
-
     data_loader_imagenet = torch.utils.data.DataLoader(
         clean_data, batch_size=cfg.data.batch_size, shuffle=False
     )
-    data_loader_target = torch.utils.data.DataLoader(
-        target_data, batch_size=cfg.data.batch_size, shuffle=False
+
+    gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
+    gsdm_generator = GSDMGenerator(
+        device=cfg.model.device,
+        box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
+        text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
+        mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
     )
 
-    print("Using source crop:", cfg.model.use_source_crop)
-    print("Using target crop:", cfg.model.use_target_crop)
-
-    # ---- 步骤4: 配置Local Matching裁剪策略 ----
-    source_crop = (
-        transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
-        if cfg.model.use_source_crop
-        else torch.nn.Identity()
-    )
-    target_crop = (
-        transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
-        if cfg.model.use_target_crop
-        else torch.nn.Identity()
-    )
-
-    # ---- 步骤5: 主循环 — 逐对处理图像 ----
-    
-    # DCA攻击时，统一初始化GSDM生成器（只初始化一次，避免重复加载模型）
-    gsdm_generator = None
-    if cfg.attack == "dca":
-        gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
-        gsdm_generator = GSDMGenerator(
-            device=cfg.model.device,
-            box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
-            text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
-            mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
-        )
-    
-    # 统一参数：所有攻击函数接受相同参数集，path_org和gsdm_generator在不需要时忽略
-    attack_fn = {
-        "fgsm": fgsm_attack,
-        "mifgsm": mifgsm_attack,
-        "pgd": pgd_attack,
-        "dca": dca_attack,
-    }[cfg.attack]
-    
     config_hash = hash_training_config(cfg)
-    
-    for i, ((image_org, _, path_org), (image_tgt, _, path_tgt)) in enumerate(
-        zip(data_loader_imagenet, data_loader_target)
-    ):
+
+    for i, (image_org, _, path_org) in enumerate(data_loader_imagenet):
         if cfg.data.batch_size * (i + 1) > cfg.data.num_samples:
             break
 
         print(f"\nProcessing image {i+1}/{cfg.data.num_samples//cfg.data.batch_size}")
 
-        attack_imgpair(
+        image_org = image_org.to(cfg.model.device)
+        adv_image, masks = dca_attack(
             cfg=cfg,
             ensemble_extractor=ensemble_extractor,
             ensemble_loss=ensemble_loss,
-            source_crop=source_crop,
-            target_crop=target_crop,
             img_index=i,
             image_org=image_org,
-            path_org=path_org,
-            image_tgt=image_tgt,
-            attack_fn=attack_fn,
             gsdm_generator=gsdm_generator,
-            config_hash=config_hash,
         )
 
+        for path_idx in range(len(path_org)):
+            folder = os.path.basename(os.path.dirname(path_org[path_idx]))
+            name = os.path.basename(path_org[path_idx])
+            folder_to_save = os.path.join(cfg.data.output, "img", config_hash, folder)
+            ensure_dir(folder_to_save)
+
+            ext = os.path.splitext(name)[1].lower()
+            if ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
+                save_name = os.path.splitext(name)[0] + ".png" if ext in [".jpg", ".jpeg"] else name
+                torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, save_name))
+            else:
+                torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, name))
+
+            if masks and path_idx < len(masks):
+                vis_dir = os.path.join(cfg.data.output, "visualization", config_hash, folder)
+                ensure_dir(vis_dir)
+                save_name_base = os.path.splitext(name)[0]
+                save_gsdm_visualization(
+                    image_org[path_idx].detach(), masks[path_idx].detach(), adv_image[path_idx].detach(),
+                    os.path.join(vis_dir, f"{save_name_base}_gsdm.png")
+                )
+
     wandb.finish()
-
-
-def attack_imgpair(
-    cfg: MainConfig,
-    ensemble_extractor: nn.Module,
-    ensemble_loss: nn.Module,
-    source_crop: Optional[transforms.RandomResizedCrop],
-    target_crop: Optional[transforms.RandomResizedCrop],
-    img_index: int,
-    image_org: torch.Tensor,
-    path_org: List[str],
-    image_tgt: torch.Tensor,
-    attack_fn,
-    gsdm_generator=None,
-    config_hash: str = "",
-):
-    image_org, image_tgt = image_org.to(cfg.model.device), image_tgt.to(cfg.model.device)
-
-    adv_image, masks = attack_fn(
-        cfg=cfg,
-        ensemble_extractor=ensemble_extractor,
-        ensemble_loss=ensemble_loss,
-        source_crop=source_crop,
-        target_crop=target_crop,
-        img_index=img_index,
-        image_org=image_org,
-        image_tgt=image_tgt,
-        gsdm_generator=gsdm_generator,
-    )
-
-    for path_idx in range(len(path_org)):
-        folder = os.path.basename(os.path.dirname(path_org[path_idx]))
-        name = os.path.basename(path_org[path_idx])
-        folder_to_save = os.path.join(cfg.data.output, "img", config_hash, folder)
-        ensure_dir(folder_to_save)
-
-        ext = os.path.splitext(name)[1].lower()
-        if ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
-            save_name = os.path.splitext(name)[0] + ".png" if ext in [".jpg", ".jpeg"] else name
-            torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, save_name))
-        else:
-            torchvision.utils.save_image(adv_image[path_idx], os.path.join(folder_to_save, name))
-
-        # 为每张图同步保存GSDM掩码可视化
-        if masks and path_idx < len(masks):
-            vis_dir = os.path.join(cfg.data.output, "visualization", config_hash, folder)
-            ensure_dir(vis_dir)
-            save_name_base = os.path.splitext(name)[0]
-            save_gsdm_visualization(
-                image_org[path_idx].detach(), masks[path_idx].detach(), adv_image[path_idx].detach(),
-                os.path.join(vis_dir, f"{save_name_base}_gsdm.png")
-            )
 
 
 def log_metrics(pbar, metrics, img_index, epoch=None):
@@ -314,141 +236,24 @@ def log_metrics(pbar, metrics, img_index, epoch=None):
         img_index: Index of the image (for wandb logging)
         epoch: Optional epoch number for logging
     """
-    # Format metrics for progress bar
     pbar_metrics = {
         k: f"{v:.5f}" if "sim" in k else f"{v:.3f}" for k, v in metrics.items()
     }
     pbar.set_postfix(pbar_metrics)
 
-    # Prepare wandb metrics with image index
     wandb_metrics = {f"img{img_index}_{k}": v for k, v in metrics.items()}
     if epoch is not None:
         wandb_metrics["epoch"] = epoch
 
-    # Log to wandb
     wandb.log(wandb_metrics)
-
-
-def fgsm_attack(
-    cfg: MainConfig,
-    ensemble_extractor: nn.Module,
-    ensemble_loss: nn.Module,
-    source_crop: Optional[transforms.RandomResizedCrop],
-    target_crop: Optional[transforms.RandomResizedCrop],
-    img_index: int,
-    image_org: torch.Tensor,
-    image_tgt: torch.Tensor,
-    gsdm_generator=None,
-):
-    """
-    Perform FGSM attack on the image to generate adversarial examples.
-
-    Args:
-        cfg: Configuration parameters
-        ensemble_extractor: Ensemble feature extractor model
-        ensemble_loss: Ensemble loss function
-        source_crop: Optional transform for cropping source images
-        target_crop: Optional transform for cropping target images
-        i: Index of the image (for logging)
-        image_org: Original source image tensor
-        image_tgt: Target image tensor to match features with
-
-    Returns:
-        torch.Tensor: Generated adversarial image
-    """
-    # 初始化扰动
-    # 创建一个与image_org形状完全相同的全零张量，即需要优化的扰动
-    delta = torch.zeros_like(image_org, requires_grad=True)
-
-    # Progress bar for optimization
-    pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
-
-    # Main optimization loop
-    for epoch in pbar:
-
-        with torch.no_grad():
-            # target_crop(image_tgt)对目标图像进行随即裁剪
-            # set_ground_truth提取目标图像的特征并保存，由于后续计算余弦相似度
-            ensemble_loss.set_ground_truth(target_crop(image_tgt))
-
-        # Forward pass
-        adv_image = image_org + delta   # 构建当前轮次扰动
-        adv_features = ensemble_extractor(adv_image)    # 提取对抗图像的特征
-
-        # Calculate metrics
-        metrics = {
-            "max_delta": torch.max(torch.abs(delta)).item(),
-            "mean_delta": torch.mean(torch.abs(delta)).item(),
-        }
-
-        # Calculate loss based on configuration
-        global_sim = ensemble_loss(adv_features)    # 计算对抗图像特征与目标图像特征的余弦相似度
-        metrics["global_similarity"] = global_sim.item()
-
-        if cfg.model.use_source_crop:
-            # If using source crop, calculate additional local similarity
-            local_cropped = source_crop(adv_image)  #对对抗图像进行随即裁剪
-            local_features = ensemble_extractor(local_cropped)  # 提取局部特征
-            local_sim = ensemble_loss(local_features)   # 计算局部相似度
-            loss = local_sim
-            metrics["local_similarity"] = local_sim.item()
-        else:
-            # Otherwise use global similarity as loss
-            loss = global_sim
-
-        # Log current metrics
-        log_metrics(pbar, metrics, img_index, epoch)
-
-        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]  #计算梯度
-
-        # Update delta using FGSM
-        # clamp(delta, [-ε, ε]) 投影到约束空间
-        delta.data = torch.clamp(
-            delta + cfg.optim.alpha * torch.sign(grad),
-            min=-cfg.optim.epsilon,
-            max=cfg.optim.epsilon,
-        )
-
-    # Create final adversarial image
-    adv_image = image_org + delta   
-    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)    #归一化
-
-    # Log final perturbation metrics
-    final_metrics = {
-        "max_delta": torch.max(torch.abs(delta)).item(),
-        "mean_delta": torch.mean(torch.abs(delta)).item(),
-    }
-    log_metrics(pbar, final_metrics, img_index)
-
-    return adv_image, []
-
-
-def mifgsm_attack(
-    cfg, ensemble_extractor, ensemble_loss,
-    source_crop, target_crop, img_index,
-    image_org, image_tgt, gsdm_generator=None,
-):
-    raise NotImplementedError("MI-FGSM attack not yet implemented. Use 'dca' for GSDM-based attack.")
-
-
-def pgd_attack(
-    cfg, ensemble_extractor, ensemble_loss,
-    source_crop, target_crop, img_index,
-    image_org, image_tgt, gsdm_generator=None,
-):
-    raise NotImplementedError("PGD attack not yet implemented. Use 'dca' for GSDM-based attack.")
-
 
 
 def dca_attack(
     cfg: MainConfig,
     ensemble_extractor: nn.Module,
     ensemble_loss: nn.Module,
-    source_crop: Optional[transforms.RandomResizedCrop],
-    target_crop: Optional[transforms.RandomResizedCrop],
     img_index: int,
     image_org: torch.Tensor,
-    image_tgt: torch.Tensor,
     gsdm_generator=None,
 ):
     if gsdm_generator is None:
@@ -463,11 +268,12 @@ def dca_attack(
         if isinstance(result, tuple):
             mask, vis_data = result
             if vis_data.get("fallback"):
-                print(f"  [GSDM] Image {b}: no geo-features detected → uniform mask (standard attack)")
+                print(f"  [GSDM] Image {b}: no geo-features detected → uniform mask")
         else:
             mask = result
         masks.append(mask)
     M = torch.stack(masks, dim=0).to(cfg.model.device)
+    M_expanded = M.unsqueeze(1)
 
     delta = torch.zeros_like(image_org, requires_grad=True)
 
@@ -480,14 +286,16 @@ def dca_attack(
         except ImportError:
             print("Warning: lpips not installed, skipping perceptual loss")
 
-    pbar = tqdm(range(cfg.optim.steps), desc=f"DCA Attack progress")
+    pbar = tqdm(range(cfg.optim.steps), desc="DCA Feature Dispersion")
 
     for epoch in pbar:
         with torch.no_grad():
-            ensemble_loss.set_ground_truth(target_crop(image_tgt))
+            masked_org = image_org * M_expanded
+            ensemble_loss.set_ground_truth(masked_org)
 
         adv_image = image_org + delta
-        adv_features = ensemble_extractor(adv_image)
+        masked_adv = adv_image * M_expanded
+        adv_features = ensemble_extractor(masked_adv)
 
         metrics = {
             "max_delta": torch.max(torch.abs(delta)).item(),
@@ -496,7 +304,7 @@ def dca_attack(
 
         global_sim = ensemble_loss(adv_features)
         metrics["global_similarity"] = global_sim.item()
-        loss = -global_sim  # 无向攻击
+        loss = -global_sim
 
         if lpips_model is not None:
             adv_normalized = torch.clamp(adv_image / 255.0, 0.0, 1.0)
@@ -505,17 +313,9 @@ def dca_attack(
             loss = loss + cfg.dca.lpips_weight * loss_lpips
             metrics["lpips_loss"] = loss_lpips.item()
 
-        if cfg.model.use_source_crop:
-            local_cropped = source_crop(adv_image)
-            local_features = ensemble_extractor(local_cropped)
-            local_sim = ensemble_loss(local_features)
-            loss = loss - local_sim
-            metrics["local_similarity"] = local_sim.item()
-
         log_metrics(pbar, metrics, img_index, epoch)
 
         grad = torch.autograd.grad(loss, delta, create_graph=False)[0]
-        M_expanded = M.unsqueeze(1).expand_as(delta)
 
         delta.data = torch.clamp(
             delta + cfg.optim.alpha * torch.sign(grad) * M_expanded,

@@ -99,7 +99,7 @@ class MainConfig:
     wandb: WandbConfig = field(default_factory=WandbConfig)
     blackbox: BlackboxConfig = field(default_factory=BlackboxConfig)
     dca: DCAConfig = field(default_factory=DCAConfig)
-    attack: str = "fgsm"  # can be [fgsm, mifgsm, pgd, dca]
+    attack: str = "dca"  # 攻击方法固定为 dca (Feature Dispersion 无向攻击)
 
 
 # register config for different setting

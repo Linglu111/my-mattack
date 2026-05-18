@@ -4,14 +4,10 @@ defaults:
   - _self_
 
 data:
-  batch_size: 1   # 每批次处理一张图
-  num_samples: 100  # 处理100张图
-  output: "./LAT"  # 输出目录
-  # cle_data_path: "resources/images/bigscale"  # 干净图像目录
-  # tgt_data_path: "resources/images/target_images"  # 目标图像目录
-  # 自定义数据集
-  cle_data_path: "myresources/images/img2gps3k/"  # 干净图像目录
-  tgt_data_path: "myresources/images/yfcc4k/"  # 目标图像目录
+  batch_size: 1
+  num_samples: 100
+  output: "./LAT"
+  cle_data_path: "myresources/images/img2gps3k/"
 
 optim:
   alpha: 1.0  # 步长
@@ -19,13 +15,10 @@ optim:
   steps: 100  # 迭代步数
 
 model:
-  input_res: 640  # 输入图像分辨率
-  use_source_crop: true
-  use_target_crop: true
-  crop_scale: [0.5, 0.9] 
-  ensemble: true  # 是否使用模型集成
-  device: "cuda:0"  # Using GPU 1
-  backbone: ["B16", "B32", "Laion"]  # Use all models in ensemble
+  input_res: 640
+  ensemble: true
+  device: "cuda:0"
+  backbone: ["B16", "B32", "Laion"]
 
 wandb:
   project: "local_adversarial_attack"
@@ -36,7 +29,7 @@ blackbox:
   batch_size: 1
   timeout: 30
 
-attack: 'dca' # [fgsm, mifgsm, pgd, dca]  # 攻击方法选择
+attack: 'dca'  # 攻击方法固定为 dca (Feature Dispersion 无向攻击)
 
 # DCA配置（仅当attack='dca'时生效）
 dca:
