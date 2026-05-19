@@ -61,6 +61,8 @@ class GSDMGenerator:
         self.dino_processor = AutoImageProcessor.from_pretrained(model_id)
         self.dino_model = AutoModel.from_pretrained(model_id).to(self.device)
         self.dino_model.eval()
+
+        self.patch_size = getattr(self.dino_model.config, "patch_size", 14)
         self.num_registers = getattr(
             self.dino_model.config, "num_register_tokens", 0
         )
@@ -177,7 +179,19 @@ class GSDMGenerator:
         )
         outputs = self.dino_model(**inputs)
 
-        patch_features = outputs.last_hidden_state[:, 1 + self.num_registers:, :]
+        last_hidden_state = outputs.last_hidden_state
+        patch_features = last_hidden_state[:, 1 + self.num_registers :, :]
+
+        batch_size, num_patches, hidden_dim = patch_features.shape
+
+        _, _, img_h, img_w = inputs.pixel_values.shape
+        num_patches_h = img_h // self.patch_size
+        num_patches_w = img_w // self.patch_size
+
+        assert num_patches_h * num_patches_w == num_patches, (
+            f"Patch count mismatch: {num_patches_h}*{num_patches_w}={num_patches_h * num_patches_w} "
+            f"!= {num_patches}"
+        )
 
         global_mean = patch_features.mean(dim=1, keepdim=True)
         patch_features_norm = F.normalize(patch_features, p=2, dim=-1)
@@ -186,15 +200,8 @@ class GSDMGenerator:
         cos_sim = (patch_features_norm * global_mean_norm).sum(dim=-1)
         saliency = 1.0 - cos_sim
 
-        N = patch_features.size(1)
-        h_patches = w_patches = int(N**0.5 + 1e-6)
-
-        if h_patches * w_patches != N:
-            while h_patches > 1 and N % h_patches != 0:
-                h_patches -= 1
-            w_patches = N // h_patches
-
-        saliency_2d = saliency.view(1, 1, h_patches, w_patches)
+        saliency_2d = saliency.view(batch_size, num_patches_h, num_patches_w)
+        saliency_2d = saliency_2d.unsqueeze(1)
 
         saliency_resized = F.interpolate(
             saliency_2d,
