@@ -12,10 +12,7 @@ from pathlib import Path
 # 2. 地标/纪念碑：通常仅存在于特定城市或地点
 # 3. 含文字标识：路牌、店招等包含本地语言文字，直接暴露位置
 GEO_DETECT_CLASSES = (
-    "temple. church. mosque. pagoda. dome. minaret. clock tower. "
-    "statue. monument. fountain. sculpture. archway. gate. "
-    "bridge. tower. facade. column. "
-    "street sign. traffic sign. storefront. billboard. banner. license plate. "
+    "building, landmark, sign, architecture, structure"
 )
 
 

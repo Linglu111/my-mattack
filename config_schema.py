@@ -64,29 +64,15 @@ class ModelConfig:
 
 
 @dataclass
-class GSDMConfig:
-    """GSDM (Geo-Saliency Detection and Masking) parameters"""
+class GSDMAttackConfig:
+    """GSDM (Geo-Saliency Detection and Masking) attack parameters"""
 
-    box_threshold: float = 0.25  # GroundingDINO检测框置信度阈值
-    text_threshold: float = 0.20  # GroundingDINO文本匹配阈值
-    detect_classes: str = (
-        "building. architecture. street sign. traffic sign. landmark. "
-        "storefront. billboard. bridge. statue. tower. temple. church. "
-        "mosque. monument. fountain. sculpture. clock tower. dome. minaret. "
-        "pagoda. archway. gate. pillar. column. facade."
-    )
-    mask_fusion: str = "union"  # 掩码融合策略 [union, weighted, max]
-
-
-@dataclass
-class DCAConfig:
-    """DCA (Decision-aware Cross-modal Attention Masking) parameters"""
-
-    use_gsdm: bool = True  # 是否使用GSDM掩码（始终为True）
-    gsdm: GSDMConfig = field(default_factory=GSDMConfig)
-    use_lpips: bool = False  # 是否使用LPIPS感知损失
-    lpips_weight: float = 0.2  # LPIPS损失权重
-    geo_label: Optional[str] = None  # 地理标签（可选）
+    box_threshold: float = 0.25
+    text_threshold: float = 0.20
+    mask_fusion: str = "union"
+    use_lpips: bool = False
+    lpips_weight: float = 0.2
+    geo_label: Optional[str] = None
 
 
 @dataclass
@@ -98,8 +84,7 @@ class MainConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     blackbox: BlackboxConfig = field(default_factory=BlackboxConfig)
-    dca: DCAConfig = field(default_factory=DCAConfig)
-    attack: str = "fgsm"  # can be [fgsm, mifgsm, pgd, dca]
+    gsdm: GSDMAttackConfig = field(default_factory=GSDMAttackConfig)
 
 
 # register config for different setting

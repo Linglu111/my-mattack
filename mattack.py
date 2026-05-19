@@ -7,7 +7,6 @@ import torchvision.transforms as transforms
 from typing import List, Dict, Optional
 from torch import nn
 import hydra
-from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import wandb
 
@@ -167,11 +166,11 @@ def main(cfg: MainConfig):
     # 保留原始分辨率，只进行RGB转换和ToTensor
     transform_fn = transforms.Compose(
         [
-            # transforms.Resize(
-            #     cfg.model.input_res,
-            #     interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-            # ),
-            # transforms.CenterCrop(cfg.model.input_res),
+            transforms.Resize(
+                cfg.model.input_res,
+                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            ),
+            transforms.CenterCrop(cfg.model.input_res),
             transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.Lambda(lambda img: to_tensor(img)),
         ]
@@ -208,27 +207,15 @@ def main(cfg: MainConfig):
 
     # ---- 步骤5: 主循环 — 逐对处理图像 ----
     
-    # DCA攻击时，统一初始化GSDM生成器（只初始化一次，避免重复加载模型）
-    gsdm_generator = None
-    if cfg.attack == "dca":
-        gsdm_cfg = cfg.dca.gsdm if hasattr(cfg.dca, 'gsdm') else cfg.dca
-        gsdm_generator = GSDMGenerator(
-            device=cfg.model.device,
-            box_threshold=getattr(gsdm_cfg, 'box_threshold', 0.25),
-            text_threshold=getattr(gsdm_cfg, 'text_threshold', 0.20),
-            mask_fusion=getattr(gsdm_cfg, 'mask_fusion', 'union'),
-        )
-    
-    # 统一参数：所有攻击函数接受相同参数集，path_org和gsdm_generator在不需要时忽略
-    attack_fn = {
-        "fgsm": fgsm_attack,
-        "mifgsm": mifgsm_attack,
-        "pgd": pgd_attack,
-        "dca": dca_attack,
-    }[cfg.attack]
-    
+    gsdm_generator = GSDMGenerator(
+        device=cfg.model.device,
+        box_threshold=cfg.gsdm.box_threshold,
+        text_threshold=cfg.gsdm.text_threshold,
+        mask_fusion=cfg.gsdm.mask_fusion,
+    )
+
     config_hash = hash_training_config(cfg)
-    
+
     for i, ((image_org, _, path_org), (image_tgt, _, path_tgt)) in enumerate(
         zip(data_loader_imagenet, data_loader_target)
     ):
@@ -247,7 +234,6 @@ def main(cfg: MainConfig):
             image_org=image_org,
             path_org=path_org,
             image_tgt=image_tgt,
-            attack_fn=attack_fn,
             gsdm_generator=gsdm_generator,
             config_hash=config_hash,
         )
@@ -265,13 +251,12 @@ def attack_imgpair(
     image_org: torch.Tensor,
     path_org: List[str],
     image_tgt: torch.Tensor,
-    attack_fn,
-    gsdm_generator=None,
+    gsdm_generator,
     config_hash: str = "",
 ):
     image_org, image_tgt = image_org.to(cfg.model.device), image_tgt.to(cfg.model.device)
 
-    adv_image, masks = attack_fn(
+    adv_image, masks = gsdm_attack(
         cfg=cfg,
         ensemble_extractor=ensemble_extractor,
         ensemble_loss=ensemble_loss,
@@ -332,118 +317,7 @@ def log_metrics(pbar, metrics, img_index, epoch=None):
     wandb.log(wandb_metrics)
 
 
-def fgsm_attack(
-    cfg: MainConfig,
-    ensemble_extractor: nn.Module,
-    ensemble_loss: nn.Module,
-    source_crop: Optional[transforms.RandomResizedCrop],
-    target_crop: Optional[transforms.RandomResizedCrop],
-    img_index: int,
-    image_org: torch.Tensor,
-    image_tgt: torch.Tensor,
-    gsdm_generator=None,
-):
-    """
-    Perform FGSM attack on the image to generate adversarial examples.
-
-    Args:
-        cfg: Configuration parameters
-        ensemble_extractor: Ensemble feature extractor model
-        ensemble_loss: Ensemble loss function
-        source_crop: Optional transform for cropping source images
-        target_crop: Optional transform for cropping target images
-        i: Index of the image (for logging)
-        image_org: Original source image tensor
-        image_tgt: Target image tensor to match features with
-
-    Returns:
-        torch.Tensor: Generated adversarial image
-    """
-    # 初始化扰动
-    # 创建一个与image_org形状完全相同的全零张量，即需要优化的扰动
-    delta = torch.zeros_like(image_org, requires_grad=True)
-
-    # Progress bar for optimization
-    pbar = tqdm(range(cfg.optim.steps), desc=f"Attack progress")
-
-    # Main optimization loop
-    for epoch in pbar:
-
-        with torch.no_grad():
-            # target_crop(image_tgt)对目标图像进行随即裁剪
-            # set_ground_truth提取目标图像的特征并保存，由于后续计算余弦相似度
-            ensemble_loss.set_ground_truth(target_crop(image_tgt))
-
-        # Forward pass
-        adv_image = image_org + delta   # 构建当前轮次扰动
-        adv_features = ensemble_extractor(adv_image)    # 提取对抗图像的特征
-
-        # Calculate metrics
-        metrics = {
-            "max_delta": torch.max(torch.abs(delta)).item(),
-            "mean_delta": torch.mean(torch.abs(delta)).item(),
-        }
-
-        # Calculate loss based on configuration
-        global_sim = ensemble_loss(adv_features)    # 计算对抗图像特征与目标图像特征的余弦相似度
-        metrics["global_similarity"] = global_sim.item()
-
-        if cfg.model.use_source_crop:
-            # If using source crop, calculate additional local similarity
-            local_cropped = source_crop(adv_image)  #对对抗图像进行随即裁剪
-            local_features = ensemble_extractor(local_cropped)  # 提取局部特征
-            local_sim = ensemble_loss(local_features)   # 计算局部相似度
-            loss = local_sim
-            metrics["local_similarity"] = local_sim.item()
-        else:
-            # Otherwise use global similarity as loss
-            loss = global_sim
-
-        # Log current metrics
-        log_metrics(pbar, metrics, img_index, epoch)
-
-        grad = torch.autograd.grad(loss, delta, create_graph=False)[0]  #计算梯度
-
-        # Update delta using FGSM
-        # clamp(delta, [-ε, ε]) 投影到约束空间
-        delta.data = torch.clamp(
-            delta + cfg.optim.alpha * torch.sign(grad),
-            min=-cfg.optim.epsilon,
-            max=cfg.optim.epsilon,
-        )
-
-    # Create final adversarial image
-    adv_image = image_org + delta   
-    adv_image = torch.clamp(adv_image / 255.0, 0.0, 1.0)    #归一化
-
-    # Log final perturbation metrics
-    final_metrics = {
-        "max_delta": torch.max(torch.abs(delta)).item(),
-        "mean_delta": torch.mean(torch.abs(delta)).item(),
-    }
-    log_metrics(pbar, final_metrics, img_index)
-
-    return adv_image, []
-
-
-def mifgsm_attack(
-    cfg, ensemble_extractor, ensemble_loss,
-    source_crop, target_crop, img_index,
-    image_org, image_tgt, gsdm_generator=None,
-):
-    raise NotImplementedError("MI-FGSM attack not yet implemented. Use 'dca' for GSDM-based attack.")
-
-
-def pgd_attack(
-    cfg, ensemble_extractor, ensemble_loss,
-    source_crop, target_crop, img_index,
-    image_org, image_tgt, gsdm_generator=None,
-):
-    raise NotImplementedError("PGD attack not yet implemented. Use 'dca' for GSDM-based attack.")
-
-
-
-def dca_attack(
+def gsdm_attack(
     cfg: MainConfig,
     ensemble_extractor: nn.Module,
     ensemble_loss: nn.Module,
@@ -455,9 +329,9 @@ def dca_attack(
     gsdm_generator=None,
 ):
     if gsdm_generator is None:
-        raise ValueError("DCA attack requires GSDMGenerator")
+        raise ValueError("GSDM attack requires GSDMGenerator")
 
-    geo_label = getattr(cfg.dca, 'geo_label', None)
+    geo_label = cfg.gsdm.geo_label
 
     batch_size = image_org.size(0)
     masks = []
@@ -475,7 +349,7 @@ def dca_attack(
     delta = torch.zeros_like(image_org, requires_grad=True)
 
     lpips_model = None
-    if hasattr(cfg, 'dca') and cfg.dca.use_lpips:
+    if cfg.gsdm.use_lpips:
         try:
             import lpips
             lpips_model = lpips.LPIPS(net='alex').to(cfg.model.device)
@@ -483,7 +357,7 @@ def dca_attack(
         except ImportError:
             print("Warning: lpips not installed, skipping perceptual loss")
 
-    pbar = tqdm(range(cfg.optim.steps), desc=f"DCA Attack progress")
+    pbar = tqdm(range(cfg.optim.steps), desc=f"GSDM Attack progress")
 
     for epoch in pbar:
         with torch.no_grad():
@@ -505,7 +379,7 @@ def dca_attack(
             adv_normalized = torch.clamp(adv_image / 255.0, 0.0, 1.0)
             org_normalized = torch.clamp(image_org / 255.0, 0.0, 1.0)
             loss_lpips = lpips_model(adv_normalized, org_normalized).mean()
-            loss = loss + cfg.dca.lpips_weight * loss_lpips
+            loss = loss + cfg.gsdm.lpips_weight * loss_lpips
             metrics["lpips_loss"] = loss_lpips.item()
 
         if cfg.model.use_source_crop:
