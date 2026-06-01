@@ -92,7 +92,6 @@ def hash_training_config(cfg: MainConfig) -> str:
             "ensemble": bool(cfg.model.ensemble),
             "backbone": backbone,
         },
-        "attack": cfg.attack,
     }
     
     # Convert to JSON string with sorted keys

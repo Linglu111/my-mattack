@@ -28,8 +28,6 @@ wandb:
   project: "local_adversarial_attack"
   entity: "104754251506@henu.edu.cn" # fill your wandb entity
 
-attack: 'gsdm'  # （gsdm = FGSM + 地理显著性掩码约束）
-
 gsdm:
   box_threshold: 0.25
   text_threshold: 0.20
