@@ -10,6 +10,7 @@ class WandbConfig:
 
     entity: str = "???"  # fill your wandb entity
     project: str = "local_adversarial_attack"
+    mode: Optional[str] = None
 
 
 @dataclass
@@ -76,9 +77,36 @@ class GSDMAttackConfig:
 
 
 @dataclass
+class HGEConfig:
+    """Hierarchical Geographical Entropy attack parameters"""
+
+    enabled: bool = True
+    k_country: int = 10
+    k_city: int = 20
+    temperature: float = 0.07
+    lambda_country: float = 1.0
+    lambda_city: float = 1.0
+    lambda_city_global_suppress: float = 0.25
+    lambda_hge: float = 0.5
+    topk_suppress_weight: float = 0.5
+    evidence_suppress_weight: float = 0.3
+    tv_weight: float = 0.05
+    mask_epsilon: float = 6.0
+    bg_epsilon: float = 2.0
+    bg_lowfreq_enabled: bool = True
+    bg_lowfreq_ratio: float = 0.12
+    fallback_mask_epsilon: float = 6.0
+    high_epsilon_max_mask_area: float = 0.90
+    context_dilation_kernel: int = 31
+    context_padding_ratio: float = 0.15
+    vocab_path: Optional[str] = None
+
+
+@dataclass
 class MainConfig:
     """Main configuration combining all sub-configs"""
 
+    attack: str = "gsdm"
     data: DataConfig = field(default_factory=DataConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -92,13 +120,27 @@ class MainConfig:
 class Ensemble3ModelsConfig(MainConfig):
     """Configuration for ensemble_3models.py"""
 
+    attack: str = "gsdm"
     data: DataConfig = field(default_factory=lambda: DataConfig(batch_size=1))
     model: ModelConfig = field(default_factory=lambda: ModelConfig(
         use_source_crop=True, use_target_crop=True, backbone=["B16", "B32", "Laion"]
     ))
 
 
+@dataclass
+class HGEAttackConfig(MainConfig):
+    """Configuration for hge.py"""
+
+    attack: str = "hge"
+    data: DataConfig = field(default_factory=lambda: DataConfig(batch_size=1))
+    model: ModelConfig = field(default_factory=lambda: ModelConfig(
+        use_source_crop=True, use_target_crop=False, backbone=["B16", "B32", "Laion"]
+    ))
+    hge: HGEConfig = field(default_factory=HGEConfig)
+
+
 # Register configs with Hydra
 cs = ConfigStore.instance()
 cs.store(name="config", node=MainConfig)
 cs.store(name="ensemble_3models", node=Ensemble3ModelsConfig)
+cs.store(name="hge", node=HGEAttackConfig)

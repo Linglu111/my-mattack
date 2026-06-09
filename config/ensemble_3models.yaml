@@ -3,6 +3,8 @@
 defaults:
   - _self_
 
+attack: "gsdm"
+
 data:
   batch_size: 1   # 每批次处理一张图
   num_samples: 100  # 处理100张图
@@ -27,6 +29,7 @@ model:
 wandb:
   project: "local_adversarial_attack"
   entity: "104754251506@henu.edu.cn" # fill your wandb entity
+  mode: null
 
 gsdm:
   box_threshold: 0.25

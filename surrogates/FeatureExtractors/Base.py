@@ -1,17 +1,39 @@
-import torch
-from torch import nn, Tensor
 from abc import abstractmethod
-from typing import List, Any, Callable, Dict
+from typing import Any, Dict, List
+
+import torch
+from torch import Tensor, nn
+from transformers import AutoTokenizer
 
 
 class BaseFeatureExtractor(nn.Module):
     def __init__(self):
         super(BaseFeatureExtractor, self).__init__()
-        pass
+        self.tokenizer = None
 
     @abstractmethod
     def forward(self, x: Tensor) -> Tensor:
         pass
+
+    def init_text_encoder(self, model_id: str):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    @torch.no_grad()
+    def encode_texts(self, texts: List[str]) -> Tensor:
+        if self.tokenizer is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} must call init_text_encoder() before encode_texts()"
+            )
+        device = next(self.model.parameters()).device
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(device)
+        text_features = self.model.get_text_features(**inputs)
+        text_features = text_features / text_features.norm(dim=1, keepdim=True)
+        return text_features
 
 
 class EnsembleFeatureExtractor(BaseFeatureExtractor):
@@ -20,13 +42,9 @@ class EnsembleFeatureExtractor(BaseFeatureExtractor):
         self.extractors = nn.ModuleList(extractors)
 
     def forward(self, x: Tensor) -> Tensor:
-        # features = []
-        # for model in self.extractors:
-        #     features.append(model(x).squeeze())
-        # features = torch.cat(features, dim=0)
-        features = {}  # 不拼接，改为字典存储
+        features = {}
         for i, model in enumerate(self.extractors):
-            features[i] = model(x).squeeze()
+            features[i] = model(x)
         return features
 
 

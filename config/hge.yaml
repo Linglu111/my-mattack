@@ -1,0 +1,60 @@
+# Configuration for HGE geolocation privacy attack.
+
+defaults:
+  - _self_
+
+attack: "hge"
+
+data:
+  batch_size: 1
+  num_samples: 100
+  output: "./LAT"
+  cle_data_path: "data/images/img2gps3k/"
+
+optim:
+  alpha: 1.0
+  epsilon: 8
+  steps: 300
+
+model:
+  input_res: 640
+  use_source_crop: true
+  use_target_crop: false
+  crop_scale: [0.5, 0.9]
+  ensemble: true
+  device: "cuda:0"
+  backbone: ["B16", "B32", "Laion"]
+
+wandb:
+  project: "local_adversarial_attack"
+  entity: "104754251506@henu.edu.cn"
+
+gsdm:
+  box_threshold: 0.25
+  text_threshold: 0.20
+  mask_fusion: "union"
+  use_lpips: false
+  lpips_weight: 0.2
+  geo_label: null
+
+hge:
+  enabled: true
+  k_country: 8
+  k_city: 15
+  temperature: 0.07
+  lambda_country: 0.7
+  lambda_city: 1.0
+  lambda_city_global_suppress: 0.25
+  lambda_hge: 1.0
+  topk_suppress_weight: 0.5
+  evidence_suppress_weight: 0.3
+  tv_weight: 0.02
+  mask_epsilon: 32.0
+  bg_epsilon: 2.0
+  bg_lowfreq_enabled: true
+  bg_lowfreq_ratio: 0.12
+  fallback_mask_epsilon: 6.0
+  high_epsilon_max_mask_area: 0.90
+  context_dilation_kernel: 31
+  context_padding_ratio: 0.15
+  vocab_path: null

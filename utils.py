@@ -5,9 +5,17 @@ import json
 import yaml
 import hashlib
 import base64
-from typing import Dict, Any, List, Union
+import random
+from typing import Dict, List
+
+import numpy as np
+import torch
+import torchvision
+import torchvision.transforms as transforms
 from omegaconf import OmegaConf
+from torch import nn
 import wandb
+
 from config_schema import MainConfig
 
 
@@ -56,6 +64,103 @@ def get_api_key(model_name: str) -> str:
     return api_keys[model_name]
 
 
+def set_environment(seed=2023):
+    """Set deterministic seeds for Python, NumPy, and PyTorch."""
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def to_tensor(pic):
+    """Convert a PIL image to a tensor while preserving the original value range."""
+    mode_to_nptype = {"I": np.int32, "I;16": np.int16, "F": np.float32}
+    img = torch.from_numpy(
+        np.array(pic, mode_to_nptype.get(pic.mode, np.uint8), copy=True)
+    )
+    img = img.view(pic.size[1], pic.size[0], len(pic.getbands()))
+    img = img.permute((2, 0, 1)).contiguous()
+    return img.to(dtype=torch.get_default_dtype())
+
+
+class ImageFolderWithPaths(torchvision.datasets.ImageFolder):
+    """ImageFolder variant that also returns the source file path."""
+
+    def __getitem__(self, index):
+        original_tuple = super().__getitem__(index)
+        path, _ = self.samples[index]
+        return original_tuple + (path,)
+
+
+def build_image_transform(cfg: MainConfig):
+    return transforms.Compose(
+        [
+            transforms.Resize(
+                cfg.model.input_res,
+                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            ),
+            transforms.CenterCrop(cfg.model.input_res),
+            transforms.Lambda(lambda img: img.convert("RGB")),
+            transforms.Lambda(lambda img: to_tensor(img)),
+        ]
+    )
+
+
+def build_source_crop(cfg: MainConfig):
+    if cfg.model.use_source_crop:
+        return transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
+    return torch.nn.Identity()
+
+
+def build_target_crop(cfg: MainConfig):
+    if cfg.model.use_target_crop:
+        return transforms.RandomResizedCrop(cfg.model.input_res, scale=cfg.model.crop_scale)
+    return torch.nn.Identity()
+
+
+def get_models(cfg: MainConfig):
+    """Instantiate the configured CLIP surrogate models."""
+    from surrogates import (
+        ClipB16FeatureExtractor,
+        ClipB32FeatureExtractor,
+        ClipL336FeatureExtractor,
+        ClipLaionFeatureExtractor,
+        EnsembleFeatureExtractor,
+    )
+
+    backbone_map = {
+        "L336": ClipL336FeatureExtractor,
+        "B16": ClipB16FeatureExtractor,
+        "B32": ClipB32FeatureExtractor,
+        "Laion": ClipLaionFeatureExtractor,
+    }
+
+    if not cfg.model.ensemble and len(cfg.model.backbone) > 1:
+        raise ValueError("When ensemble=False, only one backbone can be specified")
+
+    models = []
+    for backbone_name in cfg.model.backbone:
+        if backbone_name not in backbone_map:
+            raise ValueError(
+                f"Unknown backbone: {backbone_name}. Valid options are: {list(backbone_map.keys())}"
+            )
+        model = backbone_map[backbone_name]().eval().to(cfg.model.device).requires_grad_(False)
+        models.append(model)
+
+    if cfg.model.ensemble:
+        return EnsembleFeatureExtractor(models), models
+    return models[0], models
+
+
+def get_ensemble_loss(cfg: MainConfig, models: List[nn.Module]):
+    from surrogates import EnsembleFeatureLoss
+
+    return EnsembleFeatureLoss(models)
+
+
 def hash_training_config(cfg: MainConfig) -> str:
     """Create a deterministic hash of training-relevant config parameters.
     
@@ -72,12 +177,13 @@ def hash_training_config(cfg: MainConfig) -> str:
         backbone = OmegaConf.to_container(cfg.model.backbone)
         
     # Create config dict with converted values
+    attack_name = str(cfg.attack).lower()
     train_config = {
+        "attack": attack_name,
         "data": {
             "batch_size": int(cfg.data.batch_size),
             "num_samples": int(cfg.data.num_samples),
             "cle_data_path": str(cfg.data.cle_data_path),
-            "tgt_data_path": str(cfg.data.tgt_data_path),
         },
         "optim": {
             "alpha": float(cfg.optim.alpha),
@@ -87,12 +193,47 @@ def hash_training_config(cfg: MainConfig) -> str:
         "model": {
             "input_res": int(cfg.model.input_res),
             "use_source_crop": bool(cfg.model.use_source_crop),
-            "use_target_crop": bool(cfg.model.use_target_crop),
             "crop_scale": tuple(float(x) for x in cfg.model.crop_scale),
             "ensemble": bool(cfg.model.ensemble),
             "backbone": backbone,
         },
+        "gsdm": {
+            "box_threshold": float(cfg.gsdm.box_threshold),
+            "text_threshold": float(cfg.gsdm.text_threshold),
+            "mask_fusion": str(cfg.gsdm.mask_fusion),
+            "geo_label": cfg.gsdm.geo_label,
+        },
     }
+
+    if attack_name == "gsdm":
+        train_config["data"]["tgt_data_path"] = str(cfg.data.tgt_data_path)
+        train_config["model"]["use_target_crop"] = bool(cfg.model.use_target_crop)
+        train_config["gsdm"]["use_lpips"] = bool(cfg.gsdm.use_lpips)
+        train_config["gsdm"]["lpips_weight"] = float(cfg.gsdm.lpips_weight)
+
+    if attack_name == "hge":
+        train_config["hge"] = {
+            "enabled": bool(cfg.hge.enabled),
+            "k_country": int(cfg.hge.k_country),
+            "k_city": int(cfg.hge.k_city),
+            "temperature": float(cfg.hge.temperature),
+            "lambda_country": float(cfg.hge.lambda_country),
+            "lambda_city": float(cfg.hge.lambda_city),
+            "lambda_city_global_suppress": float(cfg.hge.lambda_city_global_suppress),
+            "lambda_hge": float(cfg.hge.lambda_hge),
+            "topk_suppress_weight": float(cfg.hge.topk_suppress_weight),
+            "evidence_suppress_weight": float(cfg.hge.evidence_suppress_weight),
+            "tv_weight": float(cfg.hge.tv_weight),
+            "mask_epsilon": float(cfg.hge.mask_epsilon),
+            "bg_epsilon": float(cfg.hge.bg_epsilon),
+            "bg_lowfreq_enabled": bool(cfg.hge.bg_lowfreq_enabled),
+            "bg_lowfreq_ratio": float(cfg.hge.bg_lowfreq_ratio),
+            "fallback_mask_epsilon": float(cfg.hge.fallback_mask_epsilon),
+            "high_epsilon_max_mask_area": float(cfg.hge.high_epsilon_max_mask_area),
+            "context_dilation_kernel": int(cfg.hge.context_dilation_kernel),
+            "context_padding_ratio": float(cfg.hge.context_padding_ratio),
+            "vocab_path": cfg.hge.vocab_path,
+        }
     
     # Convert to JSON string with sorted keys
     json_str = json.dumps(train_config, sort_keys=True)
@@ -105,12 +246,19 @@ def setup_wandb(cfg: MainConfig, tags=None) -> None:
     Args:
         cfg: Configuration object containing wandb settings
     """
+    if not hasattr(wandb, "init"):
+        print("Warning: wandb.init is unavailable; skipping wandb logging")
+        return
+
     config_dict = OmegaConf.to_container(cfg, resolve=True)
-    wandb.init(
-        project=cfg.wandb.project,
-        config=config_dict,
-        tags=tags,
-    )
+    init_kwargs = {
+        "project": cfg.wandb.project,
+        "config": config_dict,
+        "tags": tags,
+    }
+    if cfg.wandb.mode:
+        init_kwargs["mode"] = cfg.wandb.mode
+    wandb.init(**init_kwargs)
 
 
 def encode_image(image_path: str) -> str:

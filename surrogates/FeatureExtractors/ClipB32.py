@@ -7,8 +7,10 @@ from torchvision import transforms
 class ClipB32FeatureExtractor(BaseFeatureExtractor):
     def __init__(self):
         super(ClipB32FeatureExtractor, self).__init__()
-        self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        model_id = "openai/clip-vit-base-patch32"
+        self.model = CLIPModel.from_pretrained(model_id)
+        self.processor = CLIPProcessor.from_pretrained(model_id)
+        self.init_text_encoder(model_id)
         self.normalizer = transforms.Compose(
         [
             transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
